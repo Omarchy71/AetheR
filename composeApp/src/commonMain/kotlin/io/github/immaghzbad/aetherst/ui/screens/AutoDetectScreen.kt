@@ -812,18 +812,6 @@ private fun AutoDetectFinalResult(
                     RecommendationRow(strings.AUTODETECT_LABEL_MTU, "${result.recommendedMtu} bytes", scaleFactor)
                     HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = 4.dp))
                     RecommendationRow(strings.AUTODETECT_LABEL_NETWORK_STACK, result.recommendedIpMode.displayName, scaleFactor)
-                    if (result.recommendedH2Mode) {
-                        HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = 4.dp))
-                        RecommendationRow(strings.AUTODETECT_LABEL_HTTP2_FALLBACK, strings.AUTODETECT_ENABLED, scaleFactor)
-                    }
-                    if (result.recommendedEch) {
-                        HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = 4.dp))
-                        RecommendationRow(strings.AUTODETECT_LABEL_ECH, strings.AUTODETECT_ENABLED, scaleFactor)
-                    }
-                    if (result.recommendedFragment) {
-                        HorizontalDivider(color = Color.White.copy(alpha = 0.06f), modifier = Modifier.padding(vertical = 4.dp))
-                        RecommendationRow(strings.AUTODETECT_LABEL_PACKET_FRAGMENT, strings.AUTODETECT_ENABLED, scaleFactor)
-                    }
                 }
             }
 
@@ -1251,44 +1239,11 @@ private fun DnsResultRow(result: DnsProbeResult, onCopy: () -> Unit, scaleFactor
 
 private fun buildResultForProtocol(protocol: AetherProtocol, base: AutoDetectResult): AutoDetectResult {
     val isDPI = base.networkFingerprint.supportsDPI
-    return when (protocol) {
-        AetherProtocol.MASQUE -> base.copy(
-            recommendedProtocol = protocol,
-            recommendedNoise = if (isDPI) AetherNoise.GFW else AetherNoise.FIREWALL,
-            recommendedScanMode = if (isDPI) AetherScanMode.IRONCLAD else AetherScanMode.BALANCED,
-            recommendedH2Mode = true,
-            recommendedEch = isDPI,
-            recommendedFragment = isDPI,
-            recommendedNoDataCheck = false
-        )
-        AetherProtocol.WG -> base.copy(
-            recommendedProtocol = protocol,
-            recommendedNoise = AetherNoise.BALANCED,
-            recommendedScanMode = AetherScanMode.TURBO,
-            recommendedH2Mode = false,
-            recommendedEch = false,
-            recommendedFragment = false,
-            recommendedNoDataCheck = true
-        )
-        AetherProtocol.GOOL -> base.copy(
-            recommendedProtocol = protocol,
-            recommendedNoise = AetherNoise.BALANCED,
-            recommendedScanMode = if (isDPI) AetherScanMode.IRONCLAD else AetherScanMode.BALANCED,
-            recommendedH2Mode = false,
-            recommendedEch = false,
-            recommendedFragment = false,
-            recommendedNoDataCheck = true
-        )
-        AetherProtocol.ZERO_TRUST -> base.copy(
-            recommendedProtocol = protocol,
-            recommendedNoise = AetherNoise.OFF,
-            recommendedScanMode = AetherScanMode.BALANCED,
-            recommendedH2Mode = false,
-            recommendedEch = false,
-            recommendedFragment = false,
-            recommendedNoDataCheck = true
-        )
-    }
+    return base.copy(
+        recommendedProtocol = AetherProtocol.GOOL,
+        recommendedNoise = AetherNoise.BALANCED,
+        recommendedScanMode = if (isDPI) AetherScanMode.IRONCLAD else AetherScanMode.BALANCED
+    )
 }
 
 @Composable

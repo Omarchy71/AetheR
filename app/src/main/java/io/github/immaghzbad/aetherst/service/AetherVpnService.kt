@@ -28,12 +28,10 @@ import io.github.immaghzbad.aetherst.core.HevEngineSettings
 import io.github.immaghzbad.aetherst.core.HevTun2SocksConfig
 import io.github.immaghzbad.aetherst.core.HevTun2SocksEngine
 import io.github.immaghzbad.aetherst.core.HevTun2SocksNative
-import io.github.immaghzbad.aetherst.core.PsiphonController
 import io.github.immaghzbad.aetherst.core.RoutingEngine
 import io.github.immaghzbad.aetherst.core.SocksTunBridge
 import io.github.immaghzbad.aetherst.platform.PlatformContext
 import io.github.immaghzbad.aetherst.platform.getSettings
-import io.github.immaghzbad.aetherst.shared.data.ActiveProxyProvider
 import io.github.immaghzbad.aetherst.shared.data.AetherConfigRepository
 import io.github.immaghzbad.aetherst.shared.data.LogRepository
 import io.github.immaghzbad.aetherst.shared.model.ConnectionMode
@@ -130,7 +128,6 @@ class AetherVpnService : VpnService() {
     override fun onCreate() {
         super.onCreate()
         LogRepository.initialize(getSettings(PlatformContext(this)))
-        PsiphonController.setVpnService(this)
         createNotificationChannel()
         
         val pm = getSystemService(POWER_SERVICE) as PowerManager
@@ -421,7 +418,7 @@ class AetherVpnService : VpnService() {
                                 "rwTimeout=${hevSettings.readWriteTimeoutMs}ms maxSessions=${if (hevSettings.maxSessionCount == 0) "unlimited" else hevSettings.maxSessionCount.toString()} mapdnsCache=${hevSettings.mapdnsCacheSize} udp=${config.hevUdpMode}"
                     )
 
-                    val (hevHost, hevPort) = resolveEffectiveSocks(config, ActiveProxyProvider.psiphonProxyUrl)
+                    val (hevHost, hevPort) = resolveEffectiveSocks(config)
                     val ok = hevEngine?.start(
                         tunPfd = descriptor,
                         socksAddress = hevHost,
@@ -434,8 +431,7 @@ class AetherVpnService : VpnService() {
                     if (!ok) throw IllegalStateException("HEV engine failed to start mtu=${config.mtu}")
                     lastHevUpstream = "$hevHost:$hevPort"
                 } else {
-                    val psiphonUrl = ActiveProxyProvider.psiphonProxyUrl
-                    val (bridgeHost, bridgePort) = resolveEffectiveSocks(config, psiphonUrl)
+                    val (bridgeHost, bridgePort) = resolveEffectiveSocks(config)
                     socksBridge = SocksTunBridge(
                         vpnService = this@AetherVpnService,
                         tunDescriptor = descriptor,
@@ -580,8 +576,11 @@ class AetherVpnService : VpnService() {
                             }
                         }
                     }
-                    if (cfg.peer.isNotEmpty()) {
-                        extractIps(cfg.peer, bypassIps)
+                    if (cfg.wiwOuter.isNotEmpty()) {
+                        extractIps(cfg.wiwOuter, bypassIps)
+                    }
+                    if (cfg.wiwInner.isNotEmpty()) {
+                        extractIps(cfg.wiwInner, bypassIps)
                     }
                     filesDir.listFiles()?.filter { it.name.contains("lastconn") }?.take(8)?.forEach { f ->
                         try {
@@ -714,14 +713,13 @@ class AetherVpnService : VpnService() {
             }
             ConnectionStatus.RUNNING, ConnectionStatus.TUN_ACTIVE -> {
                 if (!wasEverRunning) return
-                val psiphonUrl = ActiveProxyProvider.psiphonProxyUrl
                 val cfg = AetherConfigRepository.getInstance(getSettings(PlatformContext(this@AetherVpnService))).config.value
-                val (targetHost, targetPort) = resolveEffectiveSocks(cfg, psiphonUrl)
+                val (targetHost, targetPort) = resolveEffectiveSocks(cfg)
                 val target = "$targetHost:$targetPort"
                 when (activeTunnelEngine) {
                     TunnelEngine.HEV_TUN2SOCKS -> {
                         if (lastHevUpstream != target && hevEngine != null && vpnInterface != null) {
-                            LogRepository.i("[VpnService] HEV restart to $target for psiphon chain (was $lastHevUpstream)")
+                            LogRepository.i("[VpnService] HEV restart to $target for upstream change (was $lastHevUpstream)")
                             stopStatsJob()
                             val restartDescriptor: android.os.ParcelFileDescriptor?
                             stateMutex.withLock {
@@ -767,7 +765,7 @@ class AetherVpnService : VpnService() {
                     }
                     TunnelEngine.SOCKS_TUN_BRIDGE -> {
                         if (lastBridgeUpstream != target && socksBridge != null) {
-                            LogRepository.i("[VpnService] SocksTunBridge switch to $target mtu=${cfg.mtu} for psiphon chain (was $lastBridgeUpstream)")
+                            LogRepository.i("[VpnService] SocksTunBridge switch to $target mtu=${cfg.mtu} for upstream change (was $lastBridgeUpstream)")
                             socksBridge?.updateUpstream(targetHost, targetPort)
                             lastBridgeUpstream = target
                             if (statsJob == null) startStatsJob()
@@ -846,11 +844,8 @@ class AetherVpnService : VpnService() {
         }
     }
 
-    private fun resolveEffectiveSocks(config: io.github.immaghzbad.aetherst.shared.model.AetherConfig, psiphonUrl: String?): Pair<String, Int> {
-        val isPsiphon = psiphonUrl?.contains("3080") == true || config.upstreamProxy.contains("3080")
-        val host = if (isPsiphon) "127.0.0.1" else config.socksHost
-        val port = if (isPsiphon) 3080 else config.socksPort.toIntOrNull() ?: 1819
-        return host to port
+    private fun resolveEffectiveSocks(config: io.github.immaghzbad.aetherst.shared.model.AetherConfig): Pair<String, Int> {
+        return config.socksHost to (config.socksPort.toIntOrNull() ?: 1819)
     }
 
     private fun closeVpnInterface(attemptId: Long) {

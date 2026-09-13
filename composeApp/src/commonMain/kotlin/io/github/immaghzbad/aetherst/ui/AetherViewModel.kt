@@ -12,7 +12,6 @@ import io.github.immaghzbad.aetherst.shared.core.ConnectionController
 import io.github.immaghzbad.aetherst.shared.data.AetherConfigRepository
 import io.github.immaghzbad.aetherst.shared.data.IpInfo
 import io.github.immaghzbad.aetherst.shared.data.IpInfoRepository
-import io.github.immaghzbad.aetherst.shared.data.ActiveProxyProvider
 import io.github.immaghzbad.aetherst.shared.data.LogRepository
 import io.github.immaghzbad.aetherst.shared.data.PingRepository
 import io.github.immaghzbad.aetherst.shared.data.PingState
@@ -79,9 +78,6 @@ class AetherViewModel(platformContext: PlatformContext) : ViewModel() {
     private val _importErrorMessage = MutableStateFlow<String?>(null)
     val importErrorMessage: StateFlow<String?> = _importErrorMessage.asStateFlow()
 
-    private val _scrollToZeroTrust = MutableStateFlow(false)
-    val scrollToZeroTrust: StateFlow<Boolean> = _scrollToZeroTrust.asStateFlow()
-
     private val _isOptimizingMtu = MutableStateFlow(false)
     val isOptimizingMtu: StateFlow<Boolean> = _isOptimizingMtu.asStateFlow()
 
@@ -123,15 +119,6 @@ class AetherViewModel(platformContext: PlatformContext) : ViewModel() {
         if (currentState == ConnectionStatus.STOPPING) return
 
         val cfg = config.value
-        if (cfg.protocol == AetherProtocol.ZERO_TRUST) {
-            val strings = getEffectiveStrings(cfg.appLanguage)
-            val ztError = cfg.zeroTrustErrorLocalized(strings)
-            if (ztError != null) {
-                showToast(ztError, true)
-                _scrollToZeroTrust.value = true
-                return
-            }
-        }
 
         try {
             if ((currentState == ConnectionStatus.STOPPED) || (currentState == ConnectionStatus.ERROR)) {
@@ -177,36 +164,18 @@ class AetherViewModel(platformContext: PlatformContext) : ViewModel() {
 
     fun updateConfig(newConfig: AetherConfig) {
         val oldConfig = config.value
-        if (oldConfig.psiphonEnabled && !newConfig.httpProxyEnabled && oldConfig.httpProxyEnabled) {
-            showToast(localizedToast { TOAST_DISABLE_PSIPHON_FIRST }, true)
-            return
-        }
-        var effectiveNewConfig = newConfig
-        if (!effectiveNewConfig.psiphonEnabled && oldConfig.psiphonEnabled) {
-            effectiveNewConfig = effectiveNewConfig.copy(psiphonChainOuter = "", psiphonMasqueOrder = "auto")
-        }
+        val effectiveNewConfig = newConfig.copy(protocol = AetherProtocol.GOOL)
         val isUiOnly = oldConfig.copy(connectButtonStyle = effectiveNewConfig.connectButtonStyle, appLanguage = effectiveNewConfig.appLanguage) == effectiveNewConfig
         if (!isUiOnly && !requireDisconnected()) return
-        if (oldConfig.protocol == AetherProtocol.ZERO_TRUST && effectiveNewConfig.protocol != AetherProtocol.ZERO_TRUST) {
-            _scrollToZeroTrust.value = false
-        }
         repository.updateConfig(effectiveNewConfig)
         val needsRestart = oldConfig.connectionMode != effectiveNewConfig.connectionMode ||
                 oldConfig.tunnelAllApps != effectiveNewConfig.tunnelAllApps ||
-                oldConfig.protocol != effectiveNewConfig.protocol ||
                 oldConfig.ipMode != effectiveNewConfig.ipMode ||
                 oldConfig.mtu != effectiveNewConfig.mtu ||
                 oldConfig.tunnelEngine != effectiveNewConfig.tunnelEngine ||
                 oldConfig.ipv6Leak != effectiveNewConfig.ipv6Leak ||
                 oldConfig.socksPort != effectiveNewConfig.socksPort ||
-                oldConfig.socksHost != effectiveNewConfig.socksHost ||
-                oldConfig.psiphonEnabled != effectiveNewConfig.psiphonEnabled ||
-                oldConfig.psiphonChainMode != effectiveNewConfig.psiphonChainMode ||
-                oldConfig.psiphonViaAether != effectiveNewConfig.psiphonViaAether ||
-                oldConfig.psiphonEgressRegion != effectiveNewConfig.psiphonEgressRegion ||
-                oldConfig.psiphonSocksPort != effectiveNewConfig.psiphonSocksPort ||
-                oldConfig.psiphonChainOuter != effectiveNewConfig.psiphonChainOuter ||
-                oldConfig.psiphonMasqueOrder != effectiveNewConfig.psiphonMasqueOrder
+                oldConfig.socksHost != effectiveNewConfig.socksHost
         if (needsRestart) {
             restartConnection()
         }
@@ -339,12 +308,7 @@ class AetherViewModel(platformContext: PlatformContext) : ViewModel() {
 
             withContext(Dispatchers.Default) {
                 try {
-                    val currentProtocol = config.value.protocol
-                    val overhead = when (currentProtocol) {
-                        AetherProtocol.WG, AetherProtocol.GOOL -> 80
-                        AetherProtocol.MASQUE -> 60
-                        else -> 40
-                    }
+                    val overhead = 80
 
                     val localMtu = systemUtils.getInterfaceMtu()
                     LogRepository.i("Step 1: Local interface reports MTU: $localMtu", "MTUProbe")
@@ -465,7 +429,6 @@ class AetherViewModel(platformContext: PlatformContext) : ViewModel() {
         }
     }
     fun clearImportError() { _importErrorMessage.value = null }
-    fun onZeroTrustScrolled() { _scrollToZeroTrust.value = false }
     fun dismissUpdate() { _updateInfo.value = null }
     fun cancelImport() { _importConflictRules.value = null }
     fun applyPreset(presetId: String) {
@@ -478,32 +441,21 @@ class AetherViewModel(platformContext: PlatformContext) : ViewModel() {
         val oldConfig = config.value
         val newConfig = oldConfig.copy(
             presetId = "custom",
-            protocol = result.recommendedProtocol,
+            protocol = AetherProtocol.GOOL,
             noise = result.recommendedNoise,
             scanMode = result.recommendedScanMode,
             mtu = if (result.recommendedMtu > 0) result.recommendedMtu else oldConfig.mtu,
-            ipMode = result.recommendedIpMode,
-            h2Mode = result.recommendedH2Mode,
-            echEnabled = result.recommendedEch,
-            h2Fragment = result.recommendedFragment,
-            fragmentSize = "16-32",
-            fragmentDelay = "2-10",
-            noDataCheck = result.recommendedNoDataCheck
+            ipMode = result.recommendedIpMode
         )
         repository.applyDetectedConfig(newConfig)
         val needsRestart = oldConfig.connectionMode != newConfig.connectionMode ||
                 oldConfig.tunnelAllApps != newConfig.tunnelAllApps ||
-                oldConfig.protocol != newConfig.protocol ||
                 oldConfig.ipMode != newConfig.ipMode ||
                 oldConfig.mtu != newConfig.mtu ||
                 oldConfig.tunnelEngine != newConfig.tunnelEngine ||
                 oldConfig.ipv6Leak != newConfig.ipv6Leak ||
                 oldConfig.socksPort != newConfig.socksPort ||
-                oldConfig.socksHost != newConfig.socksHost ||
-                oldConfig.psiphonEnabled != newConfig.psiphonEnabled ||
-                oldConfig.psiphonChainMode != newConfig.psiphonChainMode ||
-                oldConfig.psiphonViaAether != newConfig.psiphonViaAether ||
-                oldConfig.psiphonEgressRegion != newConfig.psiphonEgressRegion
+                oldConfig.socksHost != newConfig.socksHost
         if (needsRestart) {
             restartConnection()
         }
@@ -554,17 +506,8 @@ class AetherViewModel(platformContext: PlatformContext) : ViewModel() {
     }
 
     private suspend fun fetchPublicIp() {
-        val psiphon = ActiveProxyProvider.psiphonProxyUrl
-        if (!psiphon.isNullOrEmpty()) {
-            val body = psiphon.removePrefix("socks5://").removePrefix("socks://")
-            val parts = body.split(":", limit = 2)
-            val host = parts.first()
-            val port = parts.getOrNull(1)?.toIntOrNull() ?: 3080
-            IpInfoRepository.fetchIpInfo(host, port, useProxy = true)
-        } else {
-            val cfg = config.value
-            IpInfoRepository.fetchIpInfo(cfg.socksHost, cfg.socksPort.toIntOrNull() ?: 1819, useProxy = true)
-        }
+        val cfg = config.value
+        IpInfoRepository.fetchIpInfo(cfg.socksHost, cfg.socksPort.toIntOrNull() ?: 1819, useProxy = true)
     }
 
     fun refreshPing() {

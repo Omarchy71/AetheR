@@ -88,8 +88,7 @@ class AetherWidgetProvider : AppWidgetProvider() {
             views.setImageViewResource(R.id.widget_button, android.R.drawable.ic_lock_power_off)
             views.setInt(R.id.widget_button, "setBackgroundResource", buttonRes)
 
-            setupProtocolButton(context, views, R.id.proto_masque, AetherProtocol.MASQUE, config.protocol, appWidgetId)
-            setupProtocolButton(context, views, R.id.proto_wire, AetherProtocol.WG, config.protocol, appWidgetId)
+            // GOOL-only: widget shows only the Gool protocol button.
             setupProtocolButton(context, views, R.id.proto_gool, AetherProtocol.GOOL, config.protocol, appWidgetId)
 
             val toggleIntent = Intent(context, AetherWidgetProvider::class.java).apply {
@@ -228,7 +227,9 @@ class AetherWidgetProvider : AppWidgetProvider() {
                     }
                     ACTION_CHANGE_PROTOCOL -> {
                         val protocolName = intent.getStringExtra("protocol") ?: return@launch
-                        val nextProtocol = runCatching { AetherProtocol.valueOf(protocolName) }.getOrNull() ?: return@launch
+                        // GOOL-only: validate the request, then force GOOL (legacy protocols migrate).
+                        if (runCatching { AetherProtocol.valueOf(protocolName) }.getOrNull() == null) return@launch
+                        val nextProtocol = AetherProtocol.GOOL
                         val currentConfig = repository.config.value
                         if (currentConfig.protocol == nextProtocol) return@launch
                         val status = ConnectionController.status.value

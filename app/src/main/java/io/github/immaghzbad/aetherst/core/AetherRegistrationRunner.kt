@@ -75,13 +75,11 @@ class AetherRegistrationRunner(private val context: Context) {
             commandList.add("--bind")
             commandList.add(bindAddr)
 
-            if (config.h2Mode) commandList.add("--h2")
             if (config.quickReconnect) commandList.add("--quick-reconnect") else commandList.add("--no-quick-reconnect")
 
-            if ((protocol == AetherProtocol.WG) || (protocol == AetherProtocol.GOOL)) {
-                commandList.add("--keepalive")
-                commandList.add(if (config.keepaliveEnabled) config.keepalive.toString() else "0")
-            }
+            // GOOL-only (WG-in-WG).
+            commandList.add("--keepalive")
+            commandList.add(if (config.keepaliveEnabled) config.keepalive.toString() else "0")
 
             if (config.upstreamProxyEnabled && config.upstreamProxy.isNotEmpty()) {
                 commandList.add("--upstream")
@@ -92,13 +90,13 @@ class AetherRegistrationRunner(private val context: Context) {
             val pb = ProcessBuilder(commandList)
             pb.directory(context.filesDir)
             val env = pb.environment()
-            env["AETHER_PROTOCOL"] = protocol.rawValue
+            // GOOL-only: protocol is always forced to GOOL.
+            env["AETHER_PROTOCOL"] = AetherProtocol.GOOL.rawValue
             env["AETHER_SCAN"] = config.scanMode.rawValue
             env["AETHER_IP"] = config.ipMode.rawValue
             env["AETHER_NOIZE"] = config.noise.rawValue
             env["AETHER_SOCKS"] = bindAddr
 
-            if (config.h2Mode) env["AETHER_MASQUE_HTTP2"] = "1"
             if (config.quickReconnect) env["AETHER_QUICK_RECONNECT"] = "1" else env["AETHER_QUICK_RECONNECT"] = "0"
             env["AETHER_WG_KEEPALIVE"] = if (config.keepaliveEnabled) config.keepalive.toString() else "0"
             env["AETHER_MASQUE_VALIDATE_SECS"] = config.validateSecs.toString()
@@ -108,7 +106,7 @@ class AetherRegistrationRunner(private val context: Context) {
 
             pb.redirectErrorStream(true)
 
-            LogRepository.i("Onboarding test: protocol=${protocol.name}, scan=${config.scanMode.name}, port=$port")
+            LogRepository.i("Onboarding test: protocol=GOOL, scan=${config.scanMode.name}, port=$port")
 
             proc = withContext(Dispatchers.IO) { pb.start() }
             synchronized(lock) {
