@@ -1,7 +1,7 @@
 {
-  "version": "1.6.9",
-  "version_code": 8,
+  "version": "1.7.0",
+  "version_code": 9,
   "is_beta": false,
   "changelog": "Some bugs fixed and UI improvements.",
-  "release_url": "https://github.com/immaghzbad/AetherST/releases/tag/v1.6.9-android"
+  "release_url": "https://github.com/immaghzbad/AetherST/releases/tag/v1.7.0-android"
 }

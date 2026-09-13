@@ -362,15 +362,16 @@ private fun DashboardContent(viewModel: AetherViewModel, scaleFactor: Float, pla
                         onUpdateConfig = { viewModel.updateConfig(it) },
                         onUpdateProtocol = { proto ->
                             if (proto == AetherProtocol.ZERO_TRUST) {
-                                viewModel.updateConfig(config.copy(protocol = proto, psiphonEnabled = false))
-                            } else if (config.psiphonEnabled) {
+                                viewModel.updateConfig(config.copy(protocol = proto, psiphonEnabled = false, torEnabled = false))
+                            } else if (config.isPsiphonActive()) {
                                 val outer = when (proto) { AetherProtocol.WG -> "wg" ; AetherProtocol.GOOL -> "gool" ; else -> "masque" }
                                 viewModel.updateConfig(config.copy(protocol = proto, psiphonChainOuter = outer))
                             } else {
                                 viewModel.updateConfig(config.copy(protocol = proto))
                             }
                         },
-                        onTogglePsiphon = { enabled -> viewModel.updateConfig(config.copy(psiphonEnabled = enabled)) },
+                        onTogglePsiphon = { enabled -> viewModel.updateConfig(config.copy(psiphonEnabled = enabled, chainProvider = io.github.immaghzbad.aetherst.shared.model.ChainProvider.PSIPHON)) },
+                        onToggleTor = { enabled -> viewModel.updateConfig(config.copy(torEnabled = enabled, chainProvider = io.github.immaghzbad.aetherst.shared.model.ChainProvider.TOR)) },
                         onRefreshIpInfo = { viewModel.refreshIpInfo() },
                         onRefreshPing = { viewModel.refreshPing() },
                         onCopy = { viewModel.copyToClipboard(it) },

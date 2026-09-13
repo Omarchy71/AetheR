@@ -73,6 +73,19 @@ enum class PsiphonChainMode(val rawValue: String, val displayName: String) {
 }
 
 @Serializable
+enum class ChainProvider(val rawValue: String, val displayName: String) {
+    PSIPHON("psiphon", "Psiphon"),
+    TOR("tor", "Tor")
+}
+
+@Serializable
+enum class TorMode(val rawValue: String, val displayName: String) {
+    TOR("chain", "Tor inside tunnel"),
+    TOR_REVERSE("reverse", "Tunnel through Tor"),
+    TOR_ONLY("only", "Tor only")
+}
+
+@Serializable
 enum class ConnectionMode {
     TUNNEL,
     PROXY_ONLY,
@@ -202,6 +215,26 @@ data class AetherConfig(
     val psiphonChainMode: PsiphonChainMode = PsiphonChainMode.AUTO,
     val psiphonMasqueOrder: String = "auto",
     val psiphonViaAether: Boolean = true,
+    val psiphonOnly: Boolean = false,
+    val chainProvider: ChainProvider = ChainProvider.PSIPHON,
+    val torEnabled: Boolean = false,
+    val torMode: TorMode = TorMode.TOR,
+    val torBindPort: String = "3081",
+    val torBridgesMode: String = "auto",
+    val torBridgeLines: String = "",
+    val torPtDir: String = "",
+    val torPtBinaries: String = "",
+    val torCountry: String = "",
+    val mimEnabled: Boolean = false,
+    val mimOuter: String = "",
+    val mimInner: String = "",
+    val mimScan: Boolean = true,
+    val quicV2Probe: Boolean = true,
+    val firewallMark: String = "",
+    val halfCloseSecs: Int = 0,
+    val tcpKeepaliveSecs: Int = 0,
+    val tcpConnectSecs: Int = 0,
+    val maxClients: Int = 0,
     val pingUrl: String = "https://www.gstatic.com/generate_204",
     val connectButtonStyle: String = "swipe",
     val appLanguage: String = "auto"
@@ -279,4 +312,8 @@ data class AetherConfig(
     }
 
     fun effectiveIpMode(): AetherIpMode = if (ipMode == AetherIpMode.AUTO) AetherIpMode.DUAL else ipMode
+
+    fun isPsiphonActive(): Boolean = chainProvider == ChainProvider.PSIPHON && psiphonEnabled
+
+    fun isTorActive(): Boolean = chainProvider == ChainProvider.TOR && torEnabled
 }

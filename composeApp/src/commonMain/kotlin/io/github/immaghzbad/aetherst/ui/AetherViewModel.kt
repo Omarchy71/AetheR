@@ -177,13 +177,24 @@ class AetherViewModel(platformContext: PlatformContext) : ViewModel() {
 
     fun updateConfig(newConfig: AetherConfig) {
         val oldConfig = config.value
-        if (oldConfig.psiphonEnabled && !newConfig.httpProxyEnabled && oldConfig.httpProxyEnabled) {
+        if (oldConfig.isPsiphonActive() && !newConfig.httpProxyEnabled && oldConfig.httpProxyEnabled) {
             showToast(localizedToast { TOAST_DISABLE_PSIPHON_FIRST }, true)
             return
         }
+        if (oldConfig.isTorActive() && !newConfig.httpProxyEnabled && oldConfig.httpProxyEnabled) {
+            showToast(localizedToast { TOAST_DISABLE_TOR_FIRST }, true)
+            return
+        }
         var effectiveNewConfig = newConfig
+        if (effectiveNewConfig.chainProvider != oldConfig.chainProvider) {
+            effectiveNewConfig = if (effectiveNewConfig.chainProvider == io.github.immaghzbad.aetherst.shared.model.ChainProvider.TOR) {
+                effectiveNewConfig.copy(psiphonEnabled = false)
+            } else {
+                effectiveNewConfig.copy(torEnabled = false)
+            }
+        }
         if (!effectiveNewConfig.psiphonEnabled && oldConfig.psiphonEnabled) {
-            effectiveNewConfig = effectiveNewConfig.copy(psiphonChainOuter = "", psiphonMasqueOrder = "auto")
+            effectiveNewConfig = effectiveNewConfig.copy(psiphonChainOuter = "", psiphonMasqueOrder = "auto", psiphonOnly = false)
         }
         val isUiOnly = oldConfig.copy(connectButtonStyle = effectiveNewConfig.connectButtonStyle, appLanguage = effectiveNewConfig.appLanguage) == effectiveNewConfig
         if (!isUiOnly && !requireDisconnected()) return
@@ -206,7 +217,27 @@ class AetherViewModel(platformContext: PlatformContext) : ViewModel() {
                 oldConfig.psiphonEgressRegion != effectiveNewConfig.psiphonEgressRegion ||
                 oldConfig.psiphonSocksPort != effectiveNewConfig.psiphonSocksPort ||
                 oldConfig.psiphonChainOuter != effectiveNewConfig.psiphonChainOuter ||
-                oldConfig.psiphonMasqueOrder != effectiveNewConfig.psiphonMasqueOrder
+                oldConfig.psiphonMasqueOrder != effectiveNewConfig.psiphonMasqueOrder ||
+                oldConfig.psiphonOnly != effectiveNewConfig.psiphonOnly ||
+                oldConfig.chainProvider != effectiveNewConfig.chainProvider ||
+                oldConfig.torEnabled != effectiveNewConfig.torEnabled ||
+                oldConfig.torMode != effectiveNewConfig.torMode ||
+                oldConfig.torBindPort != effectiveNewConfig.torBindPort ||
+                oldConfig.torBridgesMode != effectiveNewConfig.torBridgesMode ||
+                oldConfig.torBridgeLines != effectiveNewConfig.torBridgeLines ||
+                oldConfig.torPtDir != effectiveNewConfig.torPtDir ||
+                oldConfig.torPtBinaries != effectiveNewConfig.torPtBinaries ||
+                oldConfig.torCountry != effectiveNewConfig.torCountry ||
+                oldConfig.mimEnabled != effectiveNewConfig.mimEnabled ||
+                oldConfig.mimOuter != effectiveNewConfig.mimOuter ||
+                oldConfig.mimInner != effectiveNewConfig.mimInner ||
+                oldConfig.mimScan != effectiveNewConfig.mimScan ||
+                oldConfig.quicV2Probe != effectiveNewConfig.quicV2Probe ||
+                oldConfig.firewallMark != effectiveNewConfig.firewallMark ||
+                oldConfig.halfCloseSecs != effectiveNewConfig.halfCloseSecs ||
+                oldConfig.tcpKeepaliveSecs != effectiveNewConfig.tcpKeepaliveSecs ||
+                oldConfig.tcpConnectSecs != effectiveNewConfig.tcpConnectSecs ||
+                oldConfig.maxClients != effectiveNewConfig.maxClients
         if (needsRestart) {
             restartConnection()
         }
@@ -256,6 +287,7 @@ class AetherViewModel(platformContext: PlatformContext) : ViewModel() {
         when (modeOrdinal) {
             1 -> tunneled.add(packageName)
             2 -> blocked.add(packageName)
+            else -> excluded.add(packageName)
         }
         updateConfig(current.copy(tunneledPackages = tunneled.toSet(), blockedPackages = blocked.toSet(), excludedPackages = excluded.toSet()))
         restartConnection()
@@ -274,6 +306,7 @@ class AetherViewModel(platformContext: PlatformContext) : ViewModel() {
             when (modeOrdinal) {
                 1 -> tunneled.add(pkg)
                 2 -> blocked.add(pkg)
+                else -> excluded.add(pkg)
             }
         }
         updateConfig(current.copy(tunneledPackages = tunneled.toSet(), blockedPackages = blocked.toSet(), excludedPackages = excluded.toSet()))
@@ -503,7 +536,11 @@ class AetherViewModel(platformContext: PlatformContext) : ViewModel() {
                 oldConfig.psiphonEnabled != newConfig.psiphonEnabled ||
                 oldConfig.psiphonChainMode != newConfig.psiphonChainMode ||
                 oldConfig.psiphonViaAether != newConfig.psiphonViaAether ||
-                oldConfig.psiphonEgressRegion != newConfig.psiphonEgressRegion
+                oldConfig.psiphonEgressRegion != newConfig.psiphonEgressRegion ||
+                oldConfig.psiphonOnly != newConfig.psiphonOnly ||
+                oldConfig.chainProvider != newConfig.chainProvider ||
+                oldConfig.torEnabled != newConfig.torEnabled ||
+                oldConfig.torMode != newConfig.torMode
         if (needsRestart) {
             restartConnection()
         }
@@ -554,6 +591,11 @@ class AetherViewModel(platformContext: PlatformContext) : ViewModel() {
     }
 
     private suspend fun fetchPublicIp() {
+        val cfg = config.value
+        if (cfg.isTorActive() && ActiveProxyProvider.torProxyUrl.isNullOrEmpty()) {
+            LogRepository.i("Tor chain pending, deferring IP lookup until Tor proxy is ready", "IpWhois")
+            return
+        }
         val psiphon = ActiveProxyProvider.psiphonProxyUrl
         if (!psiphon.isNullOrEmpty()) {
             val body = psiphon.removePrefix("socks5://").removePrefix("socks://")
@@ -561,8 +603,16 @@ class AetherViewModel(platformContext: PlatformContext) : ViewModel() {
             val host = parts.first()
             val port = parts.getOrNull(1)?.toIntOrNull() ?: 3080
             IpInfoRepository.fetchIpInfo(host, port, useProxy = true)
+            return
+        }
+        val tor = ActiveProxyProvider.torProxyUrl
+        if (!tor.isNullOrEmpty()) {
+            val body = tor.removePrefix("socks5://").removePrefix("socks://")
+            val parts = body.split(":", limit = 2)
+            val host = parts.first()
+            val port = parts.getOrNull(1)?.toIntOrNull() ?: 3081
+            IpInfoRepository.fetchIpInfo(host, port, useProxy = true)
         } else {
-            val cfg = config.value
             IpInfoRepository.fetchIpInfo(cfg.socksHost, cfg.socksPort.toIntOrNull() ?: 1819, useProxy = true)
         }
     }
@@ -572,7 +622,18 @@ class AetherViewModel(platformContext: PlatformContext) : ViewModel() {
             val state = connectionStatus.value
             if (state == ConnectionStatus.RUNNING) {
                 val cfg = config.value
-                PingRepository.runPing(cfg.socksHost, cfg.socksPort.toIntOrNull() ?: 1819, useProxy = true, pingUrl = cfg.pingUrl)
+                if (cfg.isTorActive() && ActiveProxyProvider.torProxyUrl.isNullOrEmpty()) {
+                    PingRepository.reset()
+                    return@launch
+                }
+                val tor = ActiveProxyProvider.torProxyUrl
+                if (!tor.isNullOrEmpty()) {
+                    val body = tor.removePrefix("socks5://").removePrefix("socks://")
+                    val parts = body.split(":", limit = 2)
+                    PingRepository.runPing(parts.first(), parts.getOrNull(1)?.toIntOrNull() ?: 3081, useProxy = true, pingUrl = cfg.pingUrl)
+                } else {
+                    PingRepository.runPing(cfg.socksHost, cfg.socksPort.toIntOrNull() ?: 1819, useProxy = true, pingUrl = cfg.pingUrl)
+                }
             } else {
                 PingRepository.reset()
             }
@@ -613,8 +674,23 @@ class AetherViewModel(platformContext: PlatformContext) : ViewModel() {
                 when (state) {
                     ConnectionStatus.RUNNING, ConnectionStatus.TUN_ACTIVE, ConnectionStatus.SOCKS_READY -> {
                         val cfg = config.value
-                        val host = cfg.socksHost
-                        val port = cfg.socksPort.toIntOrNull() ?: 1819
+                        if (cfg.isTorActive() && ActiveProxyProvider.torProxyUrl.isNullOrEmpty()) {
+                            ipRetryJob?.cancel()
+                            PingRepository.reset()
+                            return@collect
+                        }
+                        val tor = ActiveProxyProvider.torProxyUrl
+                        val host: String
+                        val port: Int
+                        if (!tor.isNullOrEmpty()) {
+                            val body = tor.removePrefix("socks5://").removePrefix("socks://")
+                            val parts = body.split(":", limit = 2)
+                            host = parts.first()
+                            port = parts.getOrNull(1)?.toIntOrNull() ?: 3081
+                        } else {
+                            host = cfg.socksHost
+                            port = cfg.socksPort.toIntOrNull() ?: 1819
+                        }
                         val pingUrl = cfg.pingUrl
                         viewModelScope.launch {
                             PingRepository.runPing(host, port, useProxy = true, pingUrl = pingUrl)

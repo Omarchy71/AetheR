@@ -28,6 +28,7 @@ import io.github.immaghzbad.aetherst.core.HevTun2SocksConfig
 import io.github.immaghzbad.aetherst.core.HevTun2SocksEngine
 import io.github.immaghzbad.aetherst.core.HevTun2SocksNative
 import io.github.immaghzbad.aetherst.core.PsiphonController
+import io.github.immaghzbad.aetherst.core.TorController
 import io.github.immaghzbad.aetherst.core.RoutingEngine
 import io.github.immaghzbad.aetherst.core.SocksTunBridge
 import io.github.immaghzbad.aetherst.platform.PlatformContext
@@ -130,6 +131,7 @@ class AetherVpnService : VpnService() {
         super.onCreate()
         LogRepository.initialize(getSettings(PlatformContext(this)))
         PsiphonController.setVpnService(this)
+        TorController.setVpnService(this)
         createNotificationChannel()
         
         val pm = getSystemService(POWER_SERVICE) as PowerManager
@@ -379,11 +381,11 @@ class AetherVpnService : VpnService() {
 
                 routingEngine = RoutingEngine(config.routingRules)
 
+                val needsBridgeRouting = config.blockedPackages.isNotEmpty() || config.excludedPackages.isNotEmpty() || config.routingRules.isNotEmpty()
                 val effectiveEngine = if (
-                    config.tunnelEngine == TunnelEngine.HEV_TUN2SOCKS &&
-                    (config.routingRules.isNotEmpty() || config.blockedPackages.isNotEmpty()) &&
-                    !config.tunnelAllApps
+                    config.tunnelEngine == TunnelEngine.HEV_TUN2SOCKS && needsBridgeRouting
                 ) {
+                    LogRepository.i("[VpnService] Forcing SOCKS_TUN_BRIDGE for per-UID and per-domain BLOCK and DIRECT enforcement")
                     TunnelEngine.SOCKS_TUN_BRIDGE
                 } else {
                     config.tunnelEngine
@@ -432,7 +434,7 @@ class AetherVpnService : VpnService() {
                         socksHost = bridgeHost,
                         socksPort = bridgePort,
                         mtu = config.mtu.coerceIn(576, 9000),
-                        blockedPackagesProvider = { if (config.tunnelAllApps) emptySet() else config.blockedPackages },
+                        blockedPackagesProvider = { AetherConfigRepository.getInstance(getSettings(PlatformContext(this@AetherVpnService))).config.value.blockedPackages },
                         routingEngine = routingEngine!!
                     ).apply { start() }
                     lastBridgeUpstream = "$bridgeHost:$bridgePort"
@@ -444,16 +446,31 @@ class AetherVpnService : VpnService() {
                 }
                 ensureCurrentAttempt(attemptId)
 
-                val socksPort = config.socksPort.toIntOrNull() ?: 1819
-                runCatching {
-                    val domainCode = probeCoreSocks5(config.socksHost, socksPort, domainTarget = "www.cloudflare.com", ipLiteralTarget = null)
-                    val ipCode = probeCoreSocks5(config.socksHost, socksPort, domainTarget = null, ipLiteralTarget = "1.1.1.1")
-                    LogRepository.i("[VpnService] Core proxy probe: domain-reply=$domainCode ip-literal-reply=$ipCode (0x00=granted)")
-                }.onFailure {
-                    LogRepository.e("[VpnService] Core proxy probe failed: ${it.localizedMessage}")
+                val torUrl = ActiveProxyProvider.torProxyUrl
+                val torChainPending = ConnectionController.torChaining
+                if (torChainPending) {
+                    LogRepository.i("[VpnService] Tor chain pending, deferring tunnel-active signal until Tor is ready")
+                } else if (torUrl != null) {
+                    val torProbePort = torUrl.substringAfterLast(":").toIntOrNull() ?: 3081
+                    runCatching {
+                        val domainCode = probeCoreSocks5("127.0.0.1", torProbePort, domainTarget = "www.cloudflare.com", ipLiteralTarget = null)
+                        val ipCode = probeCoreSocks5("127.0.0.1", torProbePort, domainTarget = null, ipLiteralTarget = "1.1.1.1")
+                        LogRepository.i("[VpnService] Tor proxy probe: domain-reply=$domainCode ip-literal-reply=$ipCode (0x00=granted)")
+                    }.onFailure {
+                        LogRepository.e("[VpnService] Tor proxy probe failed: ${it.localizedMessage}")
+                    }
+                    LogRepository.i("[VpnService] VPN tunnel active via $torUrl")
+                } else {
+                    val socksPort = config.socksPort.toIntOrNull() ?: 1819
+                    runCatching {
+                        val domainCode = probeCoreSocks5(config.socksHost, socksPort, domainTarget = "www.cloudflare.com", ipLiteralTarget = null)
+                        val ipCode = probeCoreSocks5(config.socksHost, socksPort, domainTarget = null, ipLiteralTarget = "1.1.1.1")
+                        LogRepository.i("[VpnService] Core proxy probe: domain-reply=$domainCode ip-literal-reply=$ipCode (0x00=granted)")
+                    }.onFailure {
+                        LogRepository.e("[VpnService] Core proxy probe failed: ${it.localizedMessage}")
+                    }
+                    LogRepository.i("[VpnService] VPN tunnel active")
                 }
-
-                LogRepository.i("[VpnService] VPN tunnel active")
                 wasEverRunning = true
                 startStatsJob()
             } catch (cancellation: CancellationException) {
@@ -497,11 +514,30 @@ class AetherVpnService : VpnService() {
         }
 
         if (config.tunnelAllApps) {
-            builder.addDisallowedApplication(packageName)
+            try {
+                builder.addDisallowedApplication(packageName)
+            } catch (e: Exception) {
+                LogRepository.w("[Tun] Failed to disallow self: ${e.message}")
+            }
+            var bypassed = 0
+            config.excludedPackages
+                .asSequence()
+                .filterNot { it == packageName }
+                .forEach { pkg ->
+                    try {
+                        builder.addDisallowedApplication(pkg)
+                        bypassed++
+                    } catch (_: PackageManager.NameNotFoundException) {
+                        LogRepository.w("[Tun] Ignoring uninstalled package: $pkg")
+                    } catch (e: Exception) {
+                        LogRepository.w("[Tun] Skipping package $pkg: ${e.message}")
+                    }
+                }
+            LogRepository.i("[Tun] Whole-device: ${config.blockedPackages.size} blocked enter TUN for RST and NXDOMAIN, $bypassed bypass excluded")
         } else {
             if (config.tunneledPackages.isNotEmpty()) {
                 var added = 0
-                config.tunneledPackages
+                (config.tunneledPackages + config.blockedPackages)
                     .asSequence()
                     .filterNot { it == packageName }
                     .forEach { pkg ->
@@ -532,6 +568,7 @@ class AetherVpnService : VpnService() {
                     for (app in allPkgs) {
                         val pkg = app.packageName
                         if (pkg == packageName) continue
+                        if (config.blockedPackages.contains(pkg)) continue
                         try {
                             builder.addDisallowedApplication(pkg)
                             disallowed++
@@ -711,7 +748,7 @@ class AetherVpnService : VpnService() {
                 when (activeTunnelEngine) {
                     TunnelEngine.HEV_TUN2SOCKS -> {
                         if (lastHevUpstream != target && hevEngine != null && vpnInterface != null) {
-                            LogRepository.i("[VpnService] HEV restart to $target for psiphon chain (was $lastHevUpstream)")
+                            LogRepository.i("[VpnService] HEV restart to $target for chain (was $lastHevUpstream)")
                             stopStatsJob()
                             val restartDescriptor: android.os.ParcelFileDescriptor?
                             stateMutex.withLock {
@@ -757,7 +794,7 @@ class AetherVpnService : VpnService() {
                     }
                     TunnelEngine.SOCKS_TUN_BRIDGE -> {
                         if (lastBridgeUpstream != target && socksBridge != null) {
-                            LogRepository.i("[VpnService] SocksTunBridge switch to $target mtu=${cfg.mtu} for psiphon chain (was $lastBridgeUpstream)")
+                            LogRepository.i("[VpnService] SocksTunBridge switch to $target mtu=${cfg.mtu} for chain (was $lastBridgeUpstream)")
                             socksBridge?.updateUpstream(targetHost, targetPort)
                             lastBridgeUpstream = target
                             if (statsJob == null) startStatsJob()
@@ -792,6 +829,9 @@ class AetherVpnService : VpnService() {
             lastBridgeUpstream = target
             DnsMap.clear()
             routingEngine?.clearCache()
+            if (ActiveProxyProvider.torProxyUrl != null && target == ActiveProxyProvider.torProxyUrl?.substringAfter("socks5://")) {
+                LogRepository.i("[VpnService] VPN tunnel active via $target")
+            }
             return
         }
         if (lastHevUpstream == target) return
@@ -830,6 +870,14 @@ class AetherVpnService : VpnService() {
                 DnsMap.clear()
                 routingEngine?.clearCache()
                 if (statsJob == null) startStatsJob()
+                if (ActiveProxyProvider.torProxyUrl != null && target == ActiveProxyProvider.torProxyUrl?.substringAfter("socks5://")) {
+                    val torVerify = runCatching { probeCoreSocks5(host, port, domainTarget = null, ipLiteralTarget = "1.1.1.1") }.getOrDefault(-1)
+                    if (torVerify == 0) {
+                        LogRepository.i("[VpnService] VPN tunnel active via $target")
+                    } else {
+                        LogRepository.e("[VpnService] Tor switch verify failed on $target reply=$torVerify")
+                    }
+                }
             } else {
                 LogRepository.e("[VpnService] HEV switch to $target failed")
             }
@@ -837,6 +885,8 @@ class AetherVpnService : VpnService() {
     }
 
     private fun resolveEffectiveSocks(config: io.github.immaghzbad.aetherst.shared.model.AetherConfig, psiphonUrl: String?): Pair<String, Int> {
+        val torPort = ActiveProxyProvider.torProxyUrl?.substringAfterLast(":")?.toIntOrNull()
+        if (torPort != null) return "127.0.0.1" to torPort
         val isPsiphon = psiphonUrl?.contains("3080") == true || config.upstreamProxy.contains("3080")
         val host = if (isPsiphon) "127.0.0.1" else config.socksHost
         val port = if (isPsiphon) 3080 else config.socksPort.toIntOrNull() ?: 1819

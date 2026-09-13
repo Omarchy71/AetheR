@@ -77,6 +77,8 @@ interface AppStrings {
     val CAT_CONNECTION_TUNNELING_SUB: String
     val CAT_PSIPHON_CHAIN: String
     val CAT_PSIPHON_CHAIN_SUB: String
+    val CHAIN_PROVIDER: String
+    val CHAIN_PROVIDER_SUB: String
     val CAT_PROTOCOL_TRANSPORT: String
     val CAT_PROTOCOL_TRANSPORT_SUB: String
     val CAT_ZEROTRUST: String
@@ -203,6 +205,8 @@ interface AppStrings {
     val SNIFFING_TIMEOUT: String
     val PSIPHON_ENABLE_TITLE: String
     val PSIPHON_ENABLE_SUB: String
+    val PSIPHON_ONLY: String
+    val PSIPHON_ONLY_SUB: String
     val OUTER_PROTOCOL: String
     val PSIPHON_CHAIN_MODE: String
     val CHAIN_MODE_AUTO: String
@@ -227,6 +231,38 @@ interface AppStrings {
     val PSIPHON_SHEET_HOW_MASQUE: String
     val PSIPHON_SHEET_HOW_WG: String
     val PSIPHON_SHEET_HOW_GOOL: String
+    val LABEL_TOR: String
+    val TOR_CHAIN: String
+    val TOR_NOT_AVAILABLE_ZT: String
+    val TOR_ROUTE_VIA: String
+    val SHOW_MORE_TOR: String
+    val TOR_OPTIONS_TITLE: String
+    val TOR_OPTIONS_SUBTITLE: String
+    val TOR_MODE: String
+    val TOR_MODE_CHAIN: String
+    val TOR_MODE_REVERSE: String
+    val TOR_MODE_ONLY: String
+    val TOR_MODE_DESC_CHAIN: String
+    val TOR_MODE_DESC_REVERSE: String
+    val TOR_MODE_DESC_ONLY: String
+    val TOR_BIND_PORT: String
+    val TOR_BRIDGES: String
+    val TOR_BRIDGES_AUTO: String
+    val TOR_BRIDGES_FORCE: String
+    val TOR_BRIDGES_OFF: String
+    val TOR_BRIDGES_DESC: String
+    val TOR_MANUAL_BRIDGES: String
+    val TOR_COUNTRY: String
+    val TOR_PT_DIR: String
+    val TOR_HOW: String
+    val MIM_ENABLE: String
+    val MIM_ENABLE_SUB: String
+    val MIM_OUTER: String
+    val MIM_INNER: String
+    val MIM_SCAN: String
+    val QUIC_V2_PROBE: String
+    val QUIC_V2_PROBE_SUB: String
+    val FIREWALL_MARK: String
     val HEV_LOG_LEVEL: String
     val HEV_CONNECT_TIMEOUT: String
     val HEV_RW_TIMEOUT: String
@@ -729,8 +765,10 @@ interface AppStrings {
     val TOAST_ZT_SERVICE_TOKEN_REQUIRES: String
     val TOAST_ZT_ONLY_ONE_AUTH: String
     val TOAST_DISABLE_PSIPHON_FIRST: String
+    val TOAST_DISABLE_TOR_FIRST: String
     val TOAST_REPORT_COPIED: String
     val INTERNAL_HTTP_PROXY_LOCKED_BY_PSIPHON: String
+    val INTERNAL_HTTP_PROXY_LOCKED_BY_TOR: String
     val CRASH_TITLE: String
     val CRASH_SUBTITLE: String
     val CRASH_DIAGNOSTICS: String

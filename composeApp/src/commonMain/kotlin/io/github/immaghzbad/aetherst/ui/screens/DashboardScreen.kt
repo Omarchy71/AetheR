@@ -109,6 +109,7 @@ import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.unit.Dp
@@ -127,6 +128,8 @@ import io.github.immaghzbad.aetherst.shared.data.PingState
 import io.github.immaghzbad.aetherst.shared.data.PsiphonEgressRegistry
 import io.github.immaghzbad.aetherst.shared.model.AetherConfig
 import io.github.immaghzbad.aetherst.shared.model.AetherProtocol
+import io.github.immaghzbad.aetherst.shared.model.ChainProvider
+import io.github.immaghzbad.aetherst.shared.model.TorMode
 import io.github.immaghzbad.aetherst.shared.model.ConnectionMode
 import io.github.immaghzbad.aetherst.shared.model.PsiphonChainMode
 import io.github.immaghzbad.aetherst.shared.model.ConnectionStatus
@@ -159,6 +162,7 @@ fun DashboardScreen(
     onUpdateConfig: (AetherConfig) -> Unit = {},
     onUpdateProtocol: (AetherProtocol) -> Unit,
     onTogglePsiphon: (Boolean) -> Unit = {},
+    onToggleTor: (Boolean) -> Unit = {},
     onRefreshIpInfo: () -> Unit = {},
     onRefreshPing: () -> Unit = {},
     onCopy: (String) -> Unit = {},
@@ -172,6 +176,7 @@ fun DashboardScreen(
     var showSupportDialog by remember { mutableStateOf(false) }
     var supportDialogAuto by remember { mutableStateOf(true) }
     var showPsiphonSheet by remember { mutableStateOf(false) }
+    var showTorSheet by remember { mutableStateOf(false) }
     val strings = LocalAppStrings.current
     val uriHandler = LocalUriHandler.current
     val settings = platformContext?.let { getSettings(it) }
@@ -421,6 +426,57 @@ fun DashboardScreen(
 
                 if (!isVeryCompactHeight) {
                     if (!isDesktop) {
+                        if (config.chainProvider == ChainProvider.TOR) {
+                        val torAllowed = config.protocol != AetherProtocol.ZERO_TRUST
+                        val torOn = config.torEnabled && torAllowed
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = if (torOn) RoundedCornerShape(20.dp) else RoundedCornerShape(50.dp),
+                            colors = CardDefaults.cardColors(containerColor = IosCardBg)
+                        ) {
+                            Column {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                    Box(modifier = Modifier.size(28.dp).clip(RoundedCornerShape(8.dp)).background(AppPalette.accentVariant), contentAlignment = Alignment.Center) {
+                                        Icon(Icons.Default.Shield, null, tint = Color.White, modifier = Modifier.size(16.dp))
+                                    }
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(strings.TOR_CHAIN, fontWeight = FontWeight.Bold, color = Color.White, fontSize = (13 * scaleFactor).sp)
+                                        Text(if (!torAllowed) strings.TOR_NOT_AVAILABLE_ZT else strings.TOR_ROUTE_VIA, color = IosSecondaryLabel, fontSize = (10 * scaleFactor).sp)
+                                    }
+                                }
+                                Switch(
+                                    checked = config.torEnabled && torAllowed,
+                                    onCheckedChange = { onToggleTor(it) },
+                                    enabled = torAllowed && (connectionStatus == ConnectionStatus.STOPPED || connectionStatus == ConnectionStatus.ERROR),
+                                    colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = IosActiveGreen, checkedBorderColor = Color.Transparent, uncheckedThumbColor = Color.White, uncheckedTrackColor = AppPalette.inactiveTrack, uncheckedBorderColor = Color.Transparent, disabledCheckedTrackColor = IosActiveGreen.copy(alpha = 0.4f), disabledCheckedThumbColor = Color.White.copy(alpha = 0.9f), disabledCheckedBorderColor = Color.Transparent,                                     disabledUncheckedTrackColor = AppPalette.inactiveTrack.copy(alpha = 0.6f), disabledUncheckedThumbColor = Color.White.copy(alpha = 0.7f), disabledUncheckedBorderColor = Color.Transparent)
+                                )
+                            }
+                                if (torOn) {
+                                    HorizontalDivider(color = Color.White.copy(alpha = 0.1f), thickness = 0.5.dp, modifier = Modifier.padding(start = 50.dp))
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth().clickable { showTorSheet = true }.padding(horizontal = 12.dp, vertical = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Box(modifier = Modifier.size(28.dp).clip(RoundedCornerShape(8.dp)).background(AppPalette.accentVariant.copy(alpha = 0.6f)), contentAlignment = Alignment.Center) {
+                                            Icon(Icons.Default.Settings, null, tint = Color.White, modifier = Modifier.size(14.dp))
+                                        }
+                                        Spacer(modifier = Modifier.width(10.dp))
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(strings.SHOW_MORE_TOR, fontWeight = FontWeight.SemiBold, color = Color.White, fontSize = (12 * scaleFactor).sp)
+                                            Text(strings.SHOW_MORE_SUBTITLE, color = IosSecondaryLabel, fontSize = (10 * scaleFactor).sp)
+                                        }
+                                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = IosSecondaryLabel, modifier = Modifier.size(16.dp))
+                                    }
+                                }
+                            }
+                        }
+                        } else {
                         val psiphonAllowed = config.protocol != AetherProtocol.ZERO_TRUST
                         val psiphonOn = config.psiphonEnabled && psiphonAllowed
                         Card(
@@ -470,6 +526,7 @@ fun DashboardScreen(
                                 }
                             }
                         }
+                        }
                     }
                     if (isDesktop && isWindows) {
                         IosConnectionModeSegmentedControl(
@@ -483,7 +540,7 @@ fun DashboardScreen(
                         selectedProtocol = config.protocol,
                         onProtocolSelected = onUpdateProtocol,
                         enabled = connectionStatus == ConnectionStatus.STOPPED || connectionStatus == ConnectionStatus.ERROR,
-                        allowedProtocols = if (config.psiphonEnabled) setOf(AetherProtocol.MASQUE, AetherProtocol.WG, AetherProtocol.GOOL) else null,
+                        allowedProtocols = if (config.isPsiphonActive() || config.isTorActive()) setOf(AetherProtocol.MASQUE, AetherProtocol.WG, AetherProtocol.GOOL) else null,
                         scaleFactor = scaleFactor
                     )
                 }
@@ -534,7 +591,9 @@ fun DashboardScreen(
                 onCopy = onCopy,
                 scaleFactor = scaleFactor,
                 psiphonEnabled = config.psiphonEnabled,
-                psiphonPort = config.psiphonSocksPort
+                psiphonPort = config.psiphonSocksPort,
+                torEnabled = config.torEnabled,
+                torPort = config.torBindPort
             )
         }
 
@@ -570,6 +629,14 @@ fun DashboardScreen(
                 config = config,
                 onUpdateConfig = onUpdateConfig,
                 onDismiss = { showPsiphonSheet = false },
+                scaleFactor = scaleFactor
+            )
+        }
+        if (showTorSheet) {
+            TorOptionsSheet(
+                config = config,
+                onUpdateConfig = onUpdateConfig,
+                onDismiss = { showTorSheet = false },
                 scaleFactor = scaleFactor
             )
         }
@@ -806,11 +873,14 @@ fun ProxyOverlayPill(
     onCopy: (String) -> Unit,
     scaleFactor: Float,
     psiphonEnabled: Boolean = false,
-    psiphonPort: String = "3080"
+    psiphonPort: String = "3080",
+    torEnabled: Boolean = false,
+    torPort: String = "3081"
 ) {
     val socksAddress = "$host:$socksPort"
     val httpAddress = "$host:$httpPort"
     val psiphonAddress = "$host:$psiphonPort"
+    val torAddress = "$host:$torPort"
 
     Surface(
         modifier = Modifier
@@ -859,6 +929,16 @@ fun ProxyOverlayPill(
                         address = psiphonAddress,
                         onCopy = {
                             onCopy(psiphonAddress)
+                        },
+                        scaleFactor = scaleFactor
+                    )
+                }
+                if (torEnabled) {
+                    ProxyCopyRow(
+                        label = "Tor",
+                        address = torAddress,
+                        onCopy = {
+                            onCopy(torAddress)
                         },
                         scaleFactor = scaleFactor
                     )
@@ -2020,6 +2100,10 @@ private fun PsiphonOptionsSheet(
                 )
             }
             Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = Color.Black)) { Column {
+                IosSwitchRow(icon = Icons.Default.Shield, iconBg = IosActiveGreen, title = strings.PSIPHON_ONLY, subtitle = strings.PSIPHON_ONLY_SUB, checked = config.psiphonOnly, onCheckedChange = { onUpdateConfig(config.copy(psiphonOnly = it)) }, testTag = "switch_psiphon_only")
+                val availableRegions by PsiphonEgressRegistry.availableRegions.collectAsStateWithLifecycle()
+                if (!config.psiphonOnly) {
+                AppDivider()
                 val outerOptions = listOf("MASQUE", "WireGuard", "Gool")
                 val outerValues = listOf("masque", "wg", "gool")
                 val currentOuter = when (config.psiphonChainOuter) { "wg" -> "WireGuard"; "gool" -> "Gool"; else -> "MASQUE" }
@@ -2057,7 +2141,6 @@ private fun PsiphonOptionsSheet(
                     }
                 }
                 AppDivider()
-                val availableRegions by PsiphonEgressRegistry.availableRegions.collectAsStateWithLifecycle()
                 val selectedRegion = config.psiphonEgressRegion.trim().uppercase()
                 val regionCodes = buildList {
                     add("")
@@ -2074,12 +2157,79 @@ private fun PsiphonOptionsSheet(
                         Text(strings.PSIPHON_SHEET_EGRESS_WARN_WG, color = Color(0xFFFFCC00), fontSize = (11 * scaleFactor).sp, lineHeight = (15 * scaleFactor).sp)
                     }
                 }
+                }
             } }
+            if (!config.psiphonOnly) {
             Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = Color.Black)) {
                 Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
                     Text(strings.HOW_IT_WORKS, fontWeight = FontWeight.Bold, color = Color.White, fontSize = (14 * scaleFactor).sp)
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(when (config.psiphonChainOuter) { "wg" -> strings.PSIPHON_SHEET_HOW_WG ; "gool" -> strings.PSIPHON_SHEET_HOW_GOOL ; else -> strings.PSIPHON_SHEET_HOW_MASQUE }, color = IosSecondaryLabel, fontSize = (12 * scaleFactor).sp, lineHeight = (17 * scaleFactor).sp)
+                }
+            }
+            }
+        }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TorOptionsSheet(
+    config: AetherConfig,
+    onUpdateConfig: (AetherConfig) -> Unit,
+    onDismiss: () -> Unit,
+    scaleFactor: Float
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val strings = LocalAppStrings.current
+    val isRtl = LocalLayoutDirection.current == LayoutDirection.Rtl
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = IosCardBg,
+        contentColor = Color.White,
+        scrimColor = Color.Black.copy(alpha = 0.6f)
+    ) {
+        CompositionLocalProvider(LocalLayoutDirection provides if (isRtl) LayoutDirection.Rtl else LayoutDirection.Ltr) {
+        Column(
+            modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).navigationBarsPadding().padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Column(modifier = Modifier.padding(horizontal = 4.dp)) {
+                Text(strings.TOR_OPTIONS_TITLE, fontWeight = FontWeight.Bold, fontSize = (18 * scaleFactor).sp, color = Color.White)
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(strings.TOR_OPTIONS_SUBTITLE, color = IosSecondaryLabel, fontSize = (12 * scaleFactor).sp)
+            }
+            Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = Color.Black)) { Column {
+                val torModes = listOf(TorMode.TOR, TorMode.TOR_REVERSE, TorMode.TOR_ONLY)
+                val torLabels = mapOf(TorMode.TOR to strings.TOR_MODE_CHAIN, TorMode.TOR_REVERSE to strings.TOR_MODE_REVERSE, TorMode.TOR_ONLY to strings.TOR_MODE_ONLY)
+                IosPickerRow(icon = Icons.Default.VpnLock, iconBg = AppPalette.statusConnected, title = strings.TOR_MODE, value = torLabels[config.torMode] ?: strings.TOR_MODE_CHAIN, options = torModes.map { torLabels[it]!! }, onOptionSelected = { idx -> onUpdateConfig(config.copy(torMode = torModes[idx])) })
+                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
+                    Text(when (config.torMode) { TorMode.TOR_REVERSE -> strings.TOR_MODE_DESC_REVERSE ; TorMode.TOR_ONLY -> strings.TOR_MODE_DESC_ONLY ; else -> strings.TOR_MODE_DESC_CHAIN }, color = IosSecondaryLabel, fontSize = (12 * scaleFactor).sp, lineHeight = (16 * scaleFactor).sp)
+                }
+                AppDivider()
+                IosInputFieldRow(icon = Icons.Default.Dns, iconBg = IosSecondaryLabel, label = strings.TOR_BIND_PORT, value = config.torBindPort, onValueChange = { onUpdateConfig(config.copy(torBindPort = it.filter { c -> c.isDigit() }.take(5))) }, placeholder = "3081", keyboardType = KeyboardType.Number, testTag = "tor_bind_port_input")
+                AppDivider()
+                val bridgeModes = listOf("auto", "force", "off")
+                val bridgeLabels = mapOf("auto" to strings.TOR_BRIDGES_AUTO, "force" to strings.TOR_BRIDGES_FORCE, "off" to strings.TOR_BRIDGES_OFF)
+                val currentBridges = when (config.torBridgesMode) { "force" -> "force"; "off" -> "off"; else -> "auto" }
+                IosPickerRow(icon = Icons.Default.Sync, iconBg = AppPalette.accent, title = strings.TOR_BRIDGES, value = bridgeLabels[currentBridges] ?: strings.TOR_BRIDGES_AUTO, options = bridgeModes.map { bridgeLabels[it]!! }, onOptionSelected = { idx -> onUpdateConfig(config.copy(torBridgesMode = bridgeModes[idx])) })
+                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
+                    Text(strings.TOR_BRIDGES_DESC, color = IosSecondaryLabel, fontSize = (12 * scaleFactor).sp, lineHeight = (16 * scaleFactor).sp)
+                }
+                AppDivider()
+                IosInputFieldRow(icon = Icons.Default.ContentCopy, iconBg = IosSecondaryLabel, label = strings.TOR_MANUAL_BRIDGES, value = config.torBridgeLines, onValueChange = { onUpdateConfig(config.copy(torBridgeLines = it)) }, placeholder = "obfs4 1.2.3.4:443 ...", testTag = "tor_bridges_input")
+                AppDivider()
+                IosInputFieldRow(icon = Icons.Default.Public, iconBg = Color(0xFF30B0C7), label = strings.TOR_COUNTRY, value = config.torCountry, onValueChange = { onUpdateConfig(config.copy(torCountry = it.filter { c -> c.isLetter() }.take(2).lowercase())) }, placeholder = "ir", testTag = "tor_country_input")
+                AppDivider()
+                IosInputFieldRow(icon = Icons.Default.Settings, iconBg = IosSecondaryLabel, label = strings.TOR_PT_DIR, value = config.torPtDir, onValueChange = { onUpdateConfig(config.copy(torPtDir = it.trim())) }, placeholder = "/path/to/pt", testTag = "tor_pt_dir_input")
+            } }
+            Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = Color.Black)) {
+                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
+                    Text(strings.HOW_IT_WORKS, fontWeight = FontWeight.Bold, color = Color.White, fontSize = (14 * scaleFactor).sp)
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(strings.TOR_HOW, color = IosSecondaryLabel, fontSize = (12 * scaleFactor).sp, lineHeight = (17 * scaleFactor).sp)
                 }
             }
         }

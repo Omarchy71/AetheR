@@ -75,6 +75,10 @@ class ConnectionController private constructor(context: Context) : ConnectionCon
         var psiphonChaining: Boolean = false
             private set
 
+        @Volatile
+        var torChaining: Boolean = false
+            private set
+
         private val _isWaitingForCode = MutableStateFlow(false)
         val isWaitingForCode: StateFlow<Boolean> = _isWaitingForCode.asStateFlow()
 
@@ -138,7 +142,8 @@ class ConnectionController private constructor(context: Context) : ConnectionCon
                     LogRepository.i("[Controller] Cloak active, routing MASQUE via ${effectiveConfig.peer}")
                 }
             }
-            val psiphonSupported = PsiphonController.isSupported(effectiveConfig)
+            val psiphonSupported = PsiphonController.isSupported(effectiveConfig) && effectiveConfig.chainProvider == ChainProvider.PSIPHON
+            val torSupported = TorController.isSupported(effectiveConfig) && effectiveConfig.chainProvider == ChainProvider.TOR
             val bindHost = if (effectiveConfig.shareHotspot) "0.0.0.0" else "127.0.0.1"
             val bindAddress = "$bindHost:${effectiveConfig.socksPort}"
             if (bindHost != "127.0.0.1") {
@@ -159,8 +164,17 @@ class ConnectionController private constructor(context: Context) : ConnectionCon
             val rawRx = TrafficStats.getUidRxBytes(Process.myUid())
             baseTx = if (rawTx == TrafficStats.UNSUPPORTED.toLong() || rawTx < 0) 0L else rawTx
             baseRx = if (rawRx == TrafficStats.UNSUPPORTED.toLong() || rawRx < 0) 0L else rawRx
+            if (torSupported) {
+                torChaining = true
+                startTorChain(effectiveConfig, bindAddress, attemptId)
+                return
+            }
             if (psiphonSupported) {
                 psiphonChaining = true
+                if (effectiveConfig.psiphonOnly) {
+                    startPsiphonOnly(effectiveConfig, attemptId)
+                    return
+                }
                 if (effectiveConfig.protocol == AetherProtocol.MASQUE) {
                     val masqueOrder = effectiveConfig.psiphonMasqueOrder.lowercase().trim()
                     if (masqueOrder == "psiphon_first") {
@@ -717,6 +731,7 @@ class ConnectionController private constructor(context: Context) : ConnectionCon
                 }
             } else {
                 ActiveProxyProvider.psiphonProxyUrl = null
+                ActiveProxyProvider.torProxyUrl = null
                 if (!startAetherInternal(effectiveConfig, bindAddress, attemptId)) {
                     throw IllegalStateException("Core failed direct")
                 }
@@ -737,7 +752,228 @@ class ConnectionController private constructor(context: Context) : ConnectionCon
         }
     }
 
+    private suspend fun startPsiphonOnly(config: AetherConfig, attemptId: Long) {
+        runNativeBounded<Unit>(30000L, "Psiphon.start") { PsiphonController.start(appContext, config, upstream = null) }
+        if (!PsiphonController.isRunning()) {
+            LogRepository.e("[Controller] Psiphon failed to start in only mode - aborting")
+            abortPsiphonOnly("Psiphon failed to start")
+        }
+        if (!awaitPsiphonStable()) {
+            LogRepository.e("[Controller] Psiphon not connected/stable in only mode - aborting")
+            abortPsiphonOnly("Psiphon not connected/stable")
+        }
+        if (activeAttemptId.get() != attemptId) {
+            ActiveProxyProvider.psiphonProxyUrl = null
+            PsiphonController.stop()
+            psiphonChaining = false
+            return
+        }
+        ActiveProxyProvider.psiphonProxyUrl = PsiphonController.getUpstreamProxy()
+        val onlyPort = ActiveProxyProvider.psiphonProxyUrl?.substringAfterLast(":")?.toIntOrNull() ?: 3080
+        LogRepository.i("[Controller] Psiphon-only settled (stable), switching engine to ${ActiveProxyProvider.psiphonProxyUrl}")
+        try {
+            val intent = Intent().setClassName(appContext.packageName, "io.github.immaghzbad.aetherst.service.AetherVpnService").apply {
+                action = "io.github.immaghzbad.aetherst.SWITCH_HEV"
+                putExtra("host", "127.0.0.1")
+                putExtra("port", onlyPort)
+            }
+            appContext.startService(intent)
+        } catch (_: Exception) {}
+        notifyStatusChanged(appContext, ConnectionStatus.RUNNING)
+        startTimer()
+        LogRepository.i("[Controller] Plain Psiphon active and validated on port $onlyPort")
+        psiphonChaining = false
+    }
+
+    private suspend fun abortPsiphonOnly(reason: String): Nothing {
+        ActiveProxyProvider.psiphonProxyUrl = null
+        PsiphonController.stop()
+        psiphonChaining = false
+        runCatching { runner.stop() }
+        throw IllegalStateException(reason)
+    }
+
+    private suspend fun startTorChain(config: AetherConfig, bindAddress: String, attemptId: Long) {
+        if (config.torMode == TorMode.TOR_ONLY) {
+            startTorOnly(config, bindAddress, attemptId)
+            return
+        }
+        if (config.torMode == TorMode.TOR_REVERSE && (config.protocol == AetherProtocol.WG || config.protocol == AetherProtocol.GOOL)) {
+            LogRepository.e("[Controller] Tor reverse refuses WireGuard/Gool, use MASQUE - chain requires Tor, aborting")
+            abortTorChain("Tor reverse requires MASQUE (WireGuard endpoints are UDP-only)")
+        }
+        runNativeBounded<Unit>(30000L, "Tor.start") {
+            TorController.cleanStaleLocks(appContext)
+            TorController.start(appContext, config)
+        }
+        if (!TorController.isPrepared()) {
+            LogRepository.e("[Controller] Tor failed to start - chain requires Tor, aborting")
+            abortTorChain("Tor failed to start")
+        }
+        if (status.value == ConnectionStatus.RUNNING) {
+            notifyStatusChanged(appContext, ConnectionStatus.VALIDATING)
+        }
+        if (!startAetherInternal(config, bindAddress, attemptId)) {
+            LogRepository.e("[Controller] Core failed with Tor chain - chain requires Tor, aborting")
+            abortTorChain("Core failed with Tor chain")
+        }
+        if (activeAttemptId.get() != attemptId) {
+            abortTorChain("Stale attempt during Tor chain")
+        }
+        TorController.notifyCoreReady()
+        if (!TorController.isRunning()) {
+            LogRepository.e("[Controller] Tor core not alive after validation - chain requires Tor, aborting")
+            abortTorChain("Tor core not alive")
+        }
+        val torPort = TorController.activePort(config)
+        if (!awaitTorStable(torPort, attemptId)) {
+            LogRepository.e("[Controller] Tor not connected/stable - chain requires Tor, aborting")
+            abortTorChain("Tor not connected/stable")
+        }
+        if (activeAttemptId.get() != attemptId) {
+            abortTorChain("Stale attempt during Tor chain")
+        }
+        ActiveProxyProvider.torProxyUrl = TorController.getUpstreamProxy()
+        LogRepository.i("[Controller] Tor proxy ready on 127.0.0.1:$torPort")
+        if (config.torMode == TorMode.TOR) {
+            LogRepository.i("[Controller] Tor settled (stable), switching engine to ${ActiveProxyProvider.torProxyUrl}")
+            try {
+                val intent = Intent().setClassName(appContext.packageName, "io.github.immaghzbad.aetherst.service.AetherVpnService").apply {
+                    action = "io.github.immaghzbad.aetherst.SWITCH_HEV"
+                    putExtra("host", "127.0.0.1")
+                    putExtra("port", torPort)
+                }
+                appContext.startService(intent)
+            } catch (_: Exception) {}
+            delay(800.milliseconds)
+            if (activeAttemptId.get() != attemptId) {
+                abortTorChain("Stale attempt during Tor chain")
+            }
+            if (!verifyPortListening("127.0.0.1", torPort) || !probeSocksReady("127.0.0.1", torPort)) {
+                LogRepository.e("[Controller] Tor engine switch verify failed on 127.0.0.1:$torPort - chain requires Tor, aborting")
+                abortTorChain("Tor engine switch verify failed")
+            }
+        } else {
+            LogRepository.i("[Controller] Tor settled (stable) in ${config.torMode.rawValue} mode via ${ActiveProxyProvider.torProxyUrl}")
+            if (!verifyPortListening("127.0.0.1", torPort) || !probeSocksReady("127.0.0.1", torPort)) {
+                LogRepository.e("[Controller] Tor proxy verify failed on 127.0.0.1:$torPort - chain requires Tor, aborting")
+                abortTorChain("Tor proxy verify failed")
+            }
+        }
+        if (activeAttemptId.get() != attemptId) {
+            abortTorChain("Stale attempt during Tor chain")
+        }
+        torChaining = false
+        notifyStatusChanged(appContext, ConnectionStatus.RUNNING)
+        startTimer()
+        LogRepository.i("[Controller] Tor chain active and validated via 127.0.0.1:$torPort")
+    }
+
+    private suspend fun startTorOnly(config: AetherConfig, bindAddress: String, attemptId: Long) {
+        runNativeBounded<Unit>(30000L, "Tor.start") {
+            TorController.cleanStaleLocks(appContext)
+            TorController.start(appContext, config)
+        }
+        if (!TorController.isPrepared()) {
+            LogRepository.e("[Controller] Tor failed to start - chain requires Tor, aborting")
+            abortTorChain("Tor failed to start")
+        }
+        if (status.value == ConnectionStatus.RUNNING) {
+            notifyStatusChanged(appContext, ConnectionStatus.VALIDATING)
+        }
+        LogRepository.i("[Controller] Tor-only mode, bringing up plain Tor without tunnel at $bindAddress")
+        runner.start(config, bindAddress, onCodeRequired = { updateIsWaitingForCode(true) }, inputProvider = { loginCodeChannel.receive() })
+        val bindPort = config.socksPort.toIntOrNull() ?: 1819
+        val deadline = System.currentTimeMillis() + 180_000
+        var lastStatus = runner.connectionStatus.value
+        var socksReady = false
+        while (currentCoroutineContext().isActive) {
+            if (activeAttemptId.get() != attemptId) return
+            val coreStatus = runner.connectionStatus.value
+            if (coreStatus != lastStatus) {
+                lastStatus = coreStatus
+                LogRepository.i("[Controller] Core status -> $coreStatus")
+            }
+            if (coreStatus == ConnectionStatus.SOCKS_READY) {
+                socksReady = true
+                break
+            }
+            if (coreStatus == ConnectionStatus.ERROR) {
+                LogRepository.e("[Controller] Core reported error in Tor-only mode - chain requires Tor, aborting")
+                abortTorChain("Core reported error in Tor-only mode")
+            }
+            if (coreStatus == ConnectionStatus.STOPPED) {
+                LogRepository.e("[Controller] Core stopped unexpectedly in Tor-only mode - chain requires Tor, aborting")
+                abortTorChain("Core stopped unexpectedly in Tor-only mode")
+            }
+            if (probeSocksReady("127.0.0.1", bindPort)) {
+                socksReady = true
+                break
+            }
+            if (System.currentTimeMillis() > deadline) {
+                LogRepository.e("[Controller] Tor-only proxy not ready after 180s - chain requires Tor, aborting")
+                abortTorChain("Tor-only proxy not ready after 180s")
+            }
+            delay(1000.milliseconds)
+        }
+        if (!socksReady) {
+            LogRepository.e("[Controller] Tor-only proxy not ready - chain requires Tor, aborting")
+            abortTorChain("Tor-only proxy not ready")
+        }
+        TorController.notifyCoreReady()
+        if (!verifyPortListening("127.0.0.1", bindPort)) {
+            LogRepository.e("[Controller] Tor-only proxy port $bindPort is not listening - chain requires Tor, aborting")
+            abortTorChain("Tor-only proxy port $bindPort is not listening")
+        }
+        TorController.notifyProxyReady(bindPort)
+        ActiveProxyProvider.torProxyUrl = TorController.getUpstreamProxy()
+        notifyStatusChanged(appContext, ConnectionStatus.RUNNING)
+        startTimer()
+        LogRepository.i("[Controller] Plain Tor active and validated on port $bindPort")
+        torChaining = false
+    }
+
+    private suspend fun abortTorChain(reason: String): Nothing {
+        ActiveProxyProvider.torProxyUrl = null
+        TorController.notifyCoreDead()
+        TorController.stop()
+        torChaining = false
+        runCatching { runner.stop() }
+        throw IllegalStateException(reason)
+    }
+
+    private suspend fun awaitTorStable(port: Int, attemptId: Long, timeoutSec: Int = 120, stableMs: Long = 10000): Boolean {
+        var wait = 0
+        var ready = false
+        while (wait < timeoutSec && !ready) {
+            if (activeAttemptId.get() != attemptId) return false
+            if (!TorController.isRunning()) {
+                delay(1000.milliseconds)
+                wait++
+                continue
+            }
+            if (probeSocksReady("127.0.0.1", port) && verifyPortListening("127.0.0.1", port)) {
+                TorController.notifyProxyReady(port)
+                ready = true
+            } else {
+                delay(1000.milliseconds)
+                wait++
+            }
+        }
+        if (!ready) return false
+        var stable = 0
+        while (stable < 25 && !TorController.stableFor(stableMs)) {
+            if (activeAttemptId.get() != attemptId) return false
+            delay(1000.milliseconds)
+            stable++
+        }
+        if (!TorController.isConnected() || !TorController.stableFor(stableMs)) return false
+        if (activeAttemptId.get() != attemptId) return false
+        return probeSocksReady("127.0.0.1", port) && verifyPortListening("127.0.0.1", port) && TorController.isConnected()
+    }
+
     private suspend fun startAetherInternal(config: AetherConfig, bindAddress: String, attemptId: Long): Boolean {
+        val chainingTor = torChaining
         LogRepository.i("[Controller] Starting core at $bindAddress (event-driven, awaiting core verdict)")
         runner.start(config, bindAddress, onCodeRequired = { updateIsWaitingForCode(true) }, inputProvider = { loginCodeChannel.receive() })
         val proxyPort = config.socksPort.toIntOrNull() ?: 1819
@@ -781,7 +1017,12 @@ class ConnectionController private constructor(context: Context) : ConnectionCon
             if (coreStatus == ConnectionStatus.STOPPED) throw IllegalStateException("Core stopped unexpectedly")
             throw IllegalStateException("Core data-plane validation failed (no verdict from core)")
         }
-        notifyStatusChanged(appContext, ConnectionStatus.DATAPLANE_VALIDATED)
+        if (chainingTor) {
+            if (_status.value != ConnectionStatus.VALIDATING) notifyStatusChanged(appContext, ConnectionStatus.VALIDATING)
+            LogRepository.i("[Controller] Core dataplane validated, holding at VALIDATING until Tor chain is ready")
+        } else {
+            notifyStatusChanged(appContext, ConnectionStatus.DATAPLANE_VALIDATED)
+        }
         val socksReady = withTimeoutOrNull(60.seconds) {
             while (currentCoroutineContext().isActive) {
                 if (activeAttemptId.get() != attemptId) return@withTimeoutOrNull false
@@ -795,6 +1036,12 @@ class ConnectionController private constructor(context: Context) : ConnectionCon
             false
         } ?: false
         if (!socksReady) throw IllegalStateException("SOCKS proxy not ready (0x00 probe failed) after 60s")
+        if (chainingTor) {
+            if (!verifyPortListening("127.0.0.1", proxyPort)) throw IllegalStateException("Proxy port $proxyPort is not listening")
+            if (_status.value != ConnectionStatus.VALIDATING) notifyStatusChanged(appContext, ConnectionStatus.VALIDATING)
+            LogRepository.i("[Controller] Core is validated on port $proxyPort, holding at VALIDATING until Tor chain is ready")
+            return true
+        }
         notifyStatusChanged(appContext, ConnectionStatus.SOCKS_READY)
         if (!verifyPortListening("127.0.0.1", proxyPort)) throw IllegalStateException("Proxy port $proxyPort is not listening")
         delay(3000.milliseconds)
@@ -809,10 +1056,12 @@ class ConnectionController private constructor(context: Context) : ConnectionCon
             if (_status.value == ConnectionStatus.STOPPED) {
                 stopTimer()
                 ActiveProxyProvider.psiphonProxyUrl = null
+                ActiveProxyProvider.torProxyUrl = null
                 return@withLock
             }
 
         psiphonChaining = false
+        torChaining = false
         val attemptId = activeAttemptId.get()
         notifyStatusChanged(appContext, ConnectionStatus.STOPPING)
         LogRepository.i("[Controller] Stopping core")
@@ -822,14 +1071,17 @@ class ConnectionController private constructor(context: Context) : ConnectionCon
                 withContext(Dispatchers.IO) {
                     runNativeBounded(3000L, "Cloak.stop") { CloakController.stop() }
                     runNativeBounded(3000L, "Psiphon.stop") { PsiphonController.stop() }
+                    runNativeBounded(3000L, "Tor.stop") { TorController.stop() }
                 }
                 ActiveProxyProvider.psiphonProxyUrl = null
+                ActiveProxyProvider.torProxyUrl = null
                 runCatching { cleanup(attemptId) }
             } ?: LogRepository.w("[Controller] Stop teardown exceeded 10s safety bound")
         } catch (e: Exception) {
             LogRepository.e("[Controller] Stop teardown error: ${e.localizedMessage}")
         } finally {
             ActiveProxyProvider.psiphonProxyUrl = null
+            ActiveProxyProvider.torProxyUrl = null
             stopTimer()
             runCatching { withTimeoutOrNull(2000.milliseconds) { cleanup(attemptId) } }
             notifyStatusChanged(appContext, ConnectionStatus.STOPPED)
@@ -882,13 +1134,14 @@ class ConnectionController private constructor(context: Context) : ConnectionCon
     private fun handleCoreStatus(coreStatus: ConnectionStatus) {
         _status.update { current ->
             if (current == ConnectionStatus.STOPPED) return@update current
-            if (psiphonChaining) return@update current
+            if (psiphonChaining || torChaining) return@update current
             if (current == ConnectionStatus.STOPPING && coreStatus != ConnectionStatus.STOPPED) {
                 return@update current
             }
 
             val next = when (coreStatus) {
                 ConnectionStatus.ERROR -> {
+                    TorController.notifyCoreDead()
                     if (current == ConnectionStatus.RUNNING || current == ConnectionStatus.RECONNECTING) {
                         LogRepository.e("[Controller] Core reported error")
                         stopTimer()
@@ -899,6 +1152,7 @@ class ConnectionController private constructor(context: Context) : ConnectionCon
                     }
                 }
                 ConnectionStatus.STOPPED -> {
+                    TorController.notifyCoreDead()
                     if (current == ConnectionStatus.RUNNING || current == ConnectionStatus.RECONNECTING) {
                         LogRepository.w("[Controller] Core stopped unexpectedly")
                         stopTimer()

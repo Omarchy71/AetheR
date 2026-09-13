@@ -176,8 +176,8 @@ class AndroidSystemUtils(private val context: Context) : SystemUtils {
         } else {
             @Suppress("DEPRECATION") pm.getPackageInfo(context.packageName, 0)
         }
-        info.versionName ?: "1.6.9"
-    } catch (_: Exception) { "1.6.9" }
+        info.versionName ?: "1.7.0"
+    } catch (_: Exception) { "1.7.0" }
     override fun getAppVersionCode(): Int = try {
         val pm = context.packageManager
         val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {

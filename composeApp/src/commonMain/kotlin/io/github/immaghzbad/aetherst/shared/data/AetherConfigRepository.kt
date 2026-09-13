@@ -179,6 +179,26 @@ class AetherConfigRepository private constructor(private val settings: Settings)
             psiphonChainMode = sanitizePsiphonChainMode(settings.getString("${prefix}psiphon_chain_mode", "AUTO")),
             psiphonMasqueOrder = settings.getString("${prefix}psiphon_masque_order", "auto"),
             psiphonViaAether = settings.getBoolean("${prefix}psiphon_via_aether", true),
+            psiphonOnly = settings.getBoolean("${prefix}psiphon_only", false),
+            chainProvider = sanitizeChainProvider(settings.getString("${prefix}chain_provider", "PSIPHON")),
+            torEnabled = settings.getBoolean("${prefix}tor_enabled", false),
+            torMode = sanitizeTorMode(settings.getString("${prefix}tor_mode", "TOR")),
+            torBindPort = settings.getString("${prefix}tor_bind_port", "3081"),
+            torBridgesMode = sanitizeTorBridgesMode(settings.getString("${prefix}tor_bridges_mode", "auto")),
+            torBridgeLines = settings.getString("${prefix}tor_bridge_lines", ""),
+            torPtDir = settings.getString("${prefix}tor_pt_dir", ""),
+            torPtBinaries = settings.getString("${prefix}tor_pt_binaries", ""),
+            torCountry = sanitizeTorCountry(settings.getString("${prefix}tor_country", "")),
+            mimEnabled = settings.getBoolean("${prefix}mim_enabled", false),
+            mimOuter = settings.getString("${prefix}mim_outer", ""),
+            mimInner = settings.getString("${prefix}mim_inner", ""),
+            mimScan = settings.getBoolean("${prefix}mim_scan", true),
+            quicV2Probe = settings.getBoolean("${prefix}quic_v2_probe", true),
+            firewallMark = settings.getString("${prefix}firewall_mark", ""),
+            halfCloseSecs = settings.getInt("${prefix}half_close_secs", 0),
+            tcpKeepaliveSecs = settings.getInt("${prefix}tcp_keepalive_secs", 0),
+            tcpConnectSecs = settings.getInt("${prefix}tcp_connect_secs", 0),
+            maxClients = settings.getInt("${prefix}max_clients", 0),
             pingUrl = sanitizePingUrl(settings.getString("${prefix}ping_url", "https://www.gstatic.com/generate_204")),
             ztStaySignedIn = settings.getBoolean("${prefix}zt_stay_signed_in", true),
             ztTokenExpiry = settings.getString("${prefix}zt_token_expiry", "0").toLongOrNull() ?: 0,
@@ -202,7 +222,16 @@ class AetherConfigRepository private constructor(private val settings: Settings)
 
     private fun enforceWireGuardConstraints(cfg: AetherConfig): AetherConfig {
         var out = cfg
+        if (out.chainProvider == ChainProvider.TOR && out.psiphonEnabled) {
+            out = out.copy(psiphonEnabled = false)
+        }
+        if (out.chainProvider == ChainProvider.PSIPHON && out.torEnabled) {
+            out = out.copy(torEnabled = false)
+        }
         if (out.psiphonEnabled && !out.httpProxyEnabled) {
+            out = out.copy(httpProxyEnabled = true)
+        }
+        if (out.torEnabled && !out.httpProxyEnabled) {
             out = out.copy(httpProxyEnabled = true)
         }
         if ((out.psiphonChainOuter == "wg" || out.psiphonChainOuter == "gool") && out.psiphonChainMode == PsiphonChainMode.FALLBACK) {
@@ -239,6 +268,24 @@ class AetherConfigRepository private constructor(private val settings: Settings)
 
     private fun sanitizePsiphonChainMode(value: String): PsiphonChainMode {
         return try { PsiphonChainMode.valueOf(value.uppercase()) } catch (_: Exception) { PsiphonChainMode.AUTO }
+    }
+
+    private fun sanitizeChainProvider(value: String): ChainProvider {
+        return try { ChainProvider.valueOf(value.uppercase()) } catch (_: Exception) { ChainProvider.PSIPHON }
+    }
+
+    private fun sanitizeTorMode(value: String): TorMode {
+        return try { TorMode.valueOf(value.uppercase()) } catch (_: Exception) { TorMode.TOR }
+    }
+
+    private fun sanitizeTorBridgesMode(value: String): String {
+        val v = value.trim().lowercase()
+        return if (v == "force" || v == "off" || v == "manual") v else "auto"
+    }
+
+    private fun sanitizeTorCountry(value: String): String {
+        val v = value.trim().lowercase()
+        return if (v.isEmpty() || v.matches(Regex("^[a-z]{2}$"))) v else ""
     }
 
     fun updateConfig(newConfig: AetherConfig) {
@@ -368,6 +415,26 @@ class AetherConfigRepository private constructor(private val settings: Settings)
         settings.putString("${prefix}psiphon_chain_mode", cfg.psiphonChainMode.name)
         settings.putString("${prefix}psiphon_masque_order", cfg.psiphonMasqueOrder)
         settings.putBoolean("${prefix}psiphon_via_aether", cfg.psiphonViaAether)
+        settings.putBoolean("${prefix}psiphon_only", cfg.psiphonOnly)
+        settings.putString("${prefix}chain_provider", cfg.chainProvider.name)
+        settings.putBoolean("${prefix}tor_enabled", cfg.torEnabled)
+        settings.putString("${prefix}tor_mode", cfg.torMode.name)
+        settings.putString("${prefix}tor_bind_port", cfg.torBindPort)
+        settings.putString("${prefix}tor_bridges_mode", sanitizeTorBridgesMode(cfg.torBridgesMode))
+        settings.putString("${prefix}tor_bridge_lines", cfg.torBridgeLines)
+        settings.putString("${prefix}tor_pt_dir", cfg.torPtDir)
+        settings.putString("${prefix}tor_pt_binaries", cfg.torPtBinaries)
+        settings.putString("${prefix}tor_country", sanitizeTorCountry(cfg.torCountry))
+        settings.putBoolean("${prefix}mim_enabled", cfg.mimEnabled)
+        settings.putString("${prefix}mim_outer", cfg.mimOuter)
+        settings.putString("${prefix}mim_inner", cfg.mimInner)
+        settings.putBoolean("${prefix}mim_scan", cfg.mimScan)
+        settings.putBoolean("${prefix}quic_v2_probe", cfg.quicV2Probe)
+        settings.putString("${prefix}firewall_mark", cfg.firewallMark)
+        settings.putInt("${prefix}half_close_secs", cfg.halfCloseSecs.coerceIn(0, 3600))
+        settings.putInt("${prefix}tcp_keepalive_secs", cfg.tcpKeepaliveSecs.coerceIn(0, 3600))
+        settings.putInt("${prefix}tcp_connect_secs", cfg.tcpConnectSecs.coerceIn(0, 600))
+        settings.putInt("${prefix}max_clients", cfg.maxClients.coerceIn(0, 65536))
         settings.putString("${prefix}ping_url", sanitizePingUrl(cfg.pingUrl))
         settings.putBoolean("${prefix}zt_stay_signed_in", cfg.ztStaySignedIn)
         settings.putString("${prefix}zt_token_expiry", cfg.ztTokenExpiry.toString())

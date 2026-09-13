@@ -2,6 +2,7 @@ package io.github.immaghzbad.aetherst.core
 
 import android.content.Context
 import io.github.immaghzbad.aetherst.core.PsiphonController
+import io.github.immaghzbad.aetherst.core.TorController
 import io.github.immaghzbad.aetherst.shared.data.LogRepository
 import io.github.immaghzbad.aetherst.shared.model.*
 import kotlinx.coroutines.CancellationException
@@ -228,6 +229,57 @@ class AetherProcessRunner(private val context: Context) {
                 if (config.upstreamProxy.startsWith("http://", ignoreCase = true)) commandList.add("--h2")
             }
 
+            if (config.torEnabled) {
+                when (config.torMode) {
+                    TorMode.TOR -> commandList.add("--tor")
+                    TorMode.TOR_REVERSE -> commandList.add("--tor-reverse")
+                    TorMode.TOR_ONLY -> commandList.add("--tor-only")
+                }
+                val torPort = TorController.activePort(config)
+                commandList.add("--tor-bind")
+                commandList.add("127.0.0.1:$torPort")
+                val torDir = java.io.File(context.filesDir, "tor")
+                if (!torDir.exists()) torDir.mkdirs()
+                commandList.add("--tor-dir")
+                commandList.add(torDir.absolutePath)
+                when (config.torBridgesMode.trim().lowercase()) {
+                    "force" -> commandList.add("--tor-bridges")
+                    "off" -> commandList.add("--no-tor-bridges")
+                }
+                config.torBridgeLines.split(";", "\n").map { it.trim() }.filter { it.isNotEmpty() }.forEach {
+                    commandList.add("--tor-bridge")
+                    commandList.add(it)
+                }
+                if (config.torPtDir.isNotBlank()) {
+                    commandList.add("--tor-pt-dir")
+                    commandList.add(config.torPtDir.trim())
+                } else {
+                    commandList.add("--tor-pt-dir")
+                    commandList.add(torDir.absolutePath)
+                }
+                config.torPtBinaries.split(";", "\n").map { it.trim() }.filter { it.isNotEmpty() }.forEach {
+                    commandList.add("--tor-pt")
+                    commandList.add(it)
+                }
+            }
+            if (config.mimEnabled) {
+                commandList.add("--mim")
+                if (config.mimOuter.isNotBlank()) {
+                    commandList.add("--mim-outer")
+                    commandList.add(config.mimOuter.trim())
+                }
+                if (config.mimInner.isNotBlank()) {
+                    commandList.add("--mim-inner")
+                    commandList.add(config.mimInner.trim())
+                }
+                if (config.mimScan) commandList.add("--mim-scan")
+            }
+            if (!config.quicV2Probe) commandList.add("--no-quic-v2")
+            if (config.firewallMark.isNotBlank()) {
+                commandList.add("--mark")
+                commandList.add(config.firewallMark.trim())
+            }
+
             val pb = ProcessBuilder(commandList)
             pb.directory(context.filesDir)
 
@@ -312,6 +364,40 @@ class AetherProcessRunner(private val context: Context) {
             }
             if (config.dnsEnabled && config.dnsList.isNotEmpty()) env["AETHER_DNS"] = config.dnsList
             if (config.upstreamProxyEnabled && config.upstreamProxy.isNotEmpty()) env["AETHER_UPSTREAM"] = config.upstreamProxy
+            if (config.torEnabled) {
+                env["AETHER_TOR"] = when (config.torMode) {
+                    TorMode.TOR -> "chain"
+                    TorMode.TOR_REVERSE -> "reverse"
+                    TorMode.TOR_ONLY -> "only"
+                }
+                val torPort = TorController.activePort(config)
+                env["AETHER_TOR_BIND"] = "127.0.0.1:$torPort"
+                val torDir = java.io.File(context.filesDir, "tor")
+                if (!torDir.exists()) torDir.mkdirs()
+                env["AETHER_TOR_DIR"] = torDir.absolutePath
+                when (config.torBridgesMode.trim().lowercase()) {
+                    "force" -> env["AETHER_TOR_BRIDGES"] = "auto"
+                    "off" -> env["AETHER_TOR_BRIDGES"] = "off"
+                }
+                val manualBridges = config.torBridgeLines.split(";", "\n").map { it.trim() }.filter { it.isNotEmpty() }
+                if (manualBridges.isNotEmpty()) env["AETHER_TOR_BRIDGES"] = manualBridges.joinToString(";")
+                val ptBinaries = config.torPtBinaries.split(";", "\n").map { it.trim() }.filter { it.isNotEmpty() }
+                if (ptBinaries.isNotEmpty()) env["AETHER_TOR_PT"] = ptBinaries.joinToString(";")
+                env["AETHER_TOR_PT_DIR"] = config.torPtDir.trim().ifEmpty { torDir.absolutePath }
+                if (config.torCountry.isNotBlank()) env["AETHER_TOR_COUNTRY"] = config.torCountry.trim().lowercase()
+            }
+            if (config.mimEnabled) {
+                env["AETHER_PROTOCOL"] = "mim"
+                if (config.mimOuter.isNotBlank()) env["AETHER_MIM_OUTER_PEER"] = config.mimOuter.trim()
+                if (config.mimInner.isNotBlank()) env["AETHER_MIM_INNER_PEER"] = config.mimInner.trim()
+                if (config.mimScan) env["AETHER_MIM_PEERS"] = "auto"
+            }
+            if (!config.quicV2Probe) env["AETHER_QUIC_V2"] = "0"
+            if (config.firewallMark.isNotBlank()) env["AETHER_MARK"] = config.firewallMark.trim()
+            if (config.halfCloseSecs > 0) env["AETHER_HALF_CLOSE_SECS"] = config.halfCloseSecs.toString()
+            if (config.tcpKeepaliveSecs > 0) env["AETHER_TCP_KEEPALIVE_SECS"] = config.tcpKeepaliveSecs.toString()
+            if (config.tcpConnectSecs > 0) env["AETHER_TCP_CONNECT_SECS"] = config.tcpConnectSecs.toString()
+            if (config.maxClients > 0) env["AETHER_MAX_CLIENTS"] = config.maxClients.toString()
             env["AETHER_ROUTE_SNIFF"] = if (config.routeSniffing) "1" else "0"
             env["AETHER_ROUTE_SNIFF_MS"] = config.sniffingTimeoutMs.toString()
             env["AETHER_REPROVISION"] = if (config.reprovision) "1" else "0"
@@ -407,21 +493,39 @@ class AetherProcessRunner(private val context: Context) {
                 else -> "BROKEN_PIPE_UNKNOWN"
             }
             LogRepository.e("[AetherCore] $cause: $line", "AetherCore")
-            if (!PsiphonController.isConnected()) {
-                LogRepository.e("[AetherCore] Psiphon upstream down; delaying reconnect 5s before retry", "AetherCore")
+            if (!PsiphonController.isConnected() && !TorController.isConnected()) {
+                LogRepository.e("[AetherCore] Chain upstream down; delaying reconnect 5s before retry", "AetherCore")
                 delay(5000.milliseconds)
             }
         } else {
+            val source = if (lower.contains("tor")) "Tor" else "AetherCore"
             when {
-                lower.contains(" error ") || lower.contains("[error]") -> LogRepository.e(line, "AetherCore")
-                lower.contains(" warn ") || lower.contains("[warn]") -> LogRepository.w(line, "AetherCore")
-                else -> LogRepository.i(line, "AetherCore")
+                lower.contains(" error ") || lower.contains("[error]") -> LogRepository.e(line, source)
+                lower.contains(" warn ") || lower.contains("[warn]") -> LogRepository.w(line, source)
+                else -> LogRepository.i(line, source)
             }
         }
 
         if (isZeroTrustCodePrompt(lower)) {
             onCodeRequired()
             return
+        }
+
+        if (lower.contains("tor")) {
+            val bootstrapMatch = Regex("""bootstrapp?ed?\s+(\d{1,3})\s*%""").find(lower)
+            if (bootstrapMatch != null) {
+                bootstrapMatch.groupValues.getOrNull(1)?.toIntOrNull()?.let { TorController.notifyBootstrap(it) }
+            }
+            if (lower.contains("tor is ready") || lower.contains("leaves through tor") || lower.contains("way out")) {
+                TorController.notifyCoreReady()
+                TorController.notifyBootstrap(100)
+                val readyPort = Regex("""127\.0\.0\.1:(\d+)""").find(line)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                TorController.notifySocksListening(readyPort ?: TorController.currentPort())
+                TorController.notifyProxyReady(readyPort ?: TorController.currentPort())
+            } else if (lower.contains("tor socks5 listening")) {
+                val listenPort = Regex("""127\.0\.0\.1:(\d+)""").find(line)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                TorController.notifySocksListening(listenPort ?: TorController.currentPort())
+            }
         }
 
         val isCriticalError = (lower.contains("fatal") || lower.contains("panic")) &&
@@ -488,8 +592,8 @@ class AetherProcessRunner(private val context: Context) {
                     goolOuterValidated = false
                     dataPlaneOk = false
                     SocksGate.setReady(SocksReadiness.NOT_READY)
-                    if (PsiphonController.isConnected() && quickRetryPending.compareAndSet(false, true)) {
-                        LogRepository.i("[AetherCore] Cached gateway lost; scheduling single 3s quick retry (Psiphon up)", "AetherCore")
+                    if ((PsiphonController.isConnected() || TorController.isConnected()) && quickRetryPending.compareAndSet(false, true)) {
+                        LogRepository.i("[AetherCore] Cached gateway lost; scheduling single 3s quick retry (chain up)", "AetherCore")
                     }
                     updateState(ConnectionStatus.RECONNECTING, attemptId)
                     scope.launch {
