@@ -29,6 +29,19 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.sync.Mutex
 import kotlin.time.Duration.Companion.milliseconds
 
+object LastMimHops {
+    @Volatile var outer: String = ""
+    @Volatile var inner: String = ""
+    fun snapshot(): Pair<String, String> = Pair(outer, inner)
+    fun clear() {
+        outer = ""
+        inner = ""
+    }
+}
+
+private val MimOuterRegex = Regex("""selected\s+MASQUE\s+gateway\s+(\S+)""", RegexOption.IGNORE_CASE)
+private val MimReadyRegex = Regex("""masque-in-masque\s+ready:?\s*(\S+)\s*\(outer\)\s+and\s+(\S+)\s*\(inner\)""", RegexOption.IGNORE_CASE)
+
 class AetherProcessRunner(private val context: Context) {
 
     private val lock = Any()
@@ -262,7 +275,9 @@ class AetherProcessRunner(private val context: Context) {
                     commandList.add(it)
                 }
             }
-            if (config.mimEnabled) {
+            val mimActive = config.protocol == AetherProtocol.MASQUE && config.mimEnabled
+            val hasMimManual = config.mimOuter.isNotBlank() || config.mimInner.isNotBlank()
+            if (mimActive) {
                 commandList.add("--mim")
                 if (config.mimOuter.isNotBlank()) {
                     commandList.add("--mim-outer")
@@ -272,7 +287,16 @@ class AetherProcessRunner(private val context: Context) {
                     commandList.add("--mim-inner")
                     commandList.add(config.mimInner.trim())
                 }
-                if (config.mimScan) commandList.add("--mim-scan")
+                if (config.mimScan && !hasMimManual) commandList.add("--mim-scan")
+                if (hasMimManual) {
+                    LogRepository.i("[MIM] manual mode outer=${config.mimOuter.trim().ifEmpty { "auto" }} inner=${config.mimInner.trim().ifEmpty { "auto" }}")
+                } else if (config.mimScan) {
+                    LogRepository.i("[MIM] full-scan mode")
+                } else {
+                    LogRepository.i("[MIM] auto mode without scan flag")
+                }
+            } else if (config.mimEnabled) {
+                LogRepository.w("MIM ignored because it is MASQUE-only (protocol=${config.protocol.rawValue})")
             }
             if (!config.quicV2Probe) commandList.add("--no-quic-v2")
             if (config.firewallMark.isNotBlank()) {
@@ -386,11 +410,11 @@ class AetherProcessRunner(private val context: Context) {
                 env["AETHER_TOR_PT_DIR"] = config.torPtDir.trim().ifEmpty { torDir.absolutePath }
                 if (config.torCountry.isNotBlank()) env["AETHER_TOR_COUNTRY"] = config.torCountry.trim().lowercase()
             }
-            if (config.mimEnabled) {
+            if (mimActive) {
                 env["AETHER_PROTOCOL"] = "mim"
                 if (config.mimOuter.isNotBlank()) env["AETHER_MIM_OUTER_PEER"] = config.mimOuter.trim()
                 if (config.mimInner.isNotBlank()) env["AETHER_MIM_INNER_PEER"] = config.mimInner.trim()
-                if (config.mimScan) env["AETHER_MIM_PEERS"] = "auto"
+                if (config.mimScan && !hasMimManual) env["AETHER_MIM_PEERS"] = "auto"
             }
             if (!config.quicV2Probe) env["AETHER_QUIC_V2"] = "0"
             if (config.firewallMark.isNotBlank()) env["AETHER_MARK"] = config.firewallMark.trim()
@@ -509,6 +533,14 @@ class AetherProcessRunner(private val context: Context) {
         if (isZeroTrustCodePrompt(lower)) {
             onCodeRequired()
             return
+        }
+
+        if (lower.contains("masque")) {
+            MimOuterRegex.find(line)?.let { LastMimHops.outer = it.groupValues[1].trim().trimEnd(',', ';') }
+            MimReadyRegex.find(line)?.let {
+                LastMimHops.outer = it.groupValues[1].trim().trimEnd(',', ';')
+                LastMimHops.inner = it.groupValues[2].trim().trimEnd(',', ';')
+            }
         }
 
         if (lower.contains("tor")) {
@@ -657,6 +689,7 @@ class AetherProcessRunner(private val context: Context) {
 
     fun stop() {
         currentAttemptId.incrementAndGet()
+        LastMimHops.clear()
         _connectionStatus.value = ConnectionStatus.STOPPED
 
         var jobToCancel: Job? = null

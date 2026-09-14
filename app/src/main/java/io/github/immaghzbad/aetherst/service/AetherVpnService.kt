@@ -38,6 +38,7 @@ import io.github.immaghzbad.aetherst.shared.data.AetherConfigRepository
 import io.github.immaghzbad.aetherst.shared.data.LogRepository
 import io.github.immaghzbad.aetherst.shared.model.ConnectionMode
 import io.github.immaghzbad.aetherst.shared.model.ConnectionStatus
+import io.github.immaghzbad.aetherst.shared.model.RoutingMode
 import io.github.immaghzbad.aetherst.shared.model.TunnelEngine
 import io.github.immaghzbad.aetherst.shared.platform.Bridge
 import kotlinx.coroutines.CancellationException
@@ -258,6 +259,7 @@ class AetherVpnService : VpnService() {
 
     private fun handleAutoReconnectOnStatus(status: ConnectionStatus) {
         if (isUserInitiatedStop) return
+        if (ConnectionController.mimGuardActive) return
         val cfg = AetherConfigRepository.getInstance(getSettings(PlatformContext(this))).config.value
         if (!cfg.smartReconnect) return
         if (status == ConnectionStatus.ERROR || status == ConnectionStatus.FAILED) {
@@ -381,13 +383,18 @@ class AetherVpnService : VpnService() {
 
                 routingEngine = RoutingEngine(config.routingRules)
 
-                val needsBridgeRouting = config.blockedPackages.isNotEmpty() || config.excludedPackages.isNotEmpty() || config.routingRules.isNotEmpty()
+                val splitEnforcementNeeded = !config.tunnelAllApps && (config.blockedPackages.isNotEmpty() || config.routingRules.any { it.mode == RoutingMode.BLOCK || it.mode == RoutingMode.DIRECT })
                 val effectiveEngine = if (
-                    config.tunnelEngine == TunnelEngine.HEV_TUN2SOCKS && needsBridgeRouting
+                    config.tunnelEngine == TunnelEngine.HEV_TUN2SOCKS && splitEnforcementNeeded
                 ) {
-                    LogRepository.i("[VpnService] Forcing SOCKS_TUN_BRIDGE for per-UID and per-domain BLOCK and DIRECT enforcement")
+                    LogRepository.i("[VpnService] Effective engine=SOCKS_TUN_BRIDGE reason=split enforcement needs per-UID and per-domain BLOCK and DIRECT")
                     TunnelEngine.SOCKS_TUN_BRIDGE
                 } else {
+                    if (config.tunnelAllApps && config.tunnelEngine == TunnelEngine.HEV_TUN2SOCKS) {
+                        LogRepository.i("[VpnService] Effective engine=HEV_TUN2SOCKS reason=whole-device stays on configured engine; domain BLOCK and DIRECT routing rules are not enforced on the native engine")
+                    } else {
+                        LogRepository.i("[VpnService] Effective engine=${config.tunnelEngine} reason=configured engine kept")
+                    }
                     config.tunnelEngine
                 }
                 activeTunnelEngine = effectiveEngine
@@ -434,7 +441,7 @@ class AetherVpnService : VpnService() {
                         socksHost = bridgeHost,
                         socksPort = bridgePort,
                         mtu = config.mtu.coerceIn(576, 9000),
-                        blockedPackagesProvider = { AetherConfigRepository.getInstance(getSettings(PlatformContext(this@AetherVpnService))).config.value.blockedPackages },
+                        blockedPackagesProvider = { val cfg = AetherConfigRepository.getInstance(getSettings(PlatformContext(this@AetherVpnService))).config.value; if (cfg.tunnelAllApps) emptySet() else cfg.blockedPackages },
                         routingEngine = routingEngine!!
                     ).apply { start() }
                     lastBridgeUpstream = "$bridgeHost:$bridgePort"
@@ -519,21 +526,7 @@ class AetherVpnService : VpnService() {
             } catch (e: Exception) {
                 LogRepository.w("[Tun] Failed to disallow self: ${e.message}")
             }
-            var bypassed = 0
-            config.excludedPackages
-                .asSequence()
-                .filterNot { it == packageName }
-                .forEach { pkg ->
-                    try {
-                        builder.addDisallowedApplication(pkg)
-                        bypassed++
-                    } catch (_: PackageManager.NameNotFoundException) {
-                        LogRepository.w("[Tun] Ignoring uninstalled package: $pkg")
-                    } catch (e: Exception) {
-                        LogRepository.w("[Tun] Skipping package $pkg: ${e.message}")
-                    }
-                }
-            LogRepository.i("[Tun] Whole-device: ${config.blockedPackages.size} blocked enter TUN for RST and NXDOMAIN, $bypassed bypass excluded")
+            LogRepository.i("[Tun] Whole-device: tunneling all apps, split lists ignored")
         } else {
             if (config.tunneledPackages.isNotEmpty()) {
                 var added = 0

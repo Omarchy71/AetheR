@@ -27,6 +27,7 @@ import io.github.immaghzbad.aetherst.shared.model.RoutingMode
 import io.github.immaghzbad.aetherst.shared.model.RoutingRule
 import io.github.immaghzbad.aetherst.shared.model.TunnelEngine
 import io.github.immaghzbad.aetherst.shared.model.UpdateInfo
+import io.github.immaghzbad.aetherst.shared.platform.Bridge
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -196,7 +197,10 @@ class AetherViewModel(platformContext: PlatformContext) : ViewModel() {
         if (!effectiveNewConfig.psiphonEnabled && oldConfig.psiphonEnabled) {
             effectiveNewConfig = effectiveNewConfig.copy(psiphonChainOuter = "", psiphonMasqueOrder = "auto", psiphonOnly = false)
         }
-        val isUiOnly = oldConfig.copy(connectButtonStyle = effectiveNewConfig.connectButtonStyle, appLanguage = effectiveNewConfig.appLanguage) == effectiveNewConfig
+        if (effectiveNewConfig.protocol != AetherProtocol.MASQUE && (effectiveNewConfig.mimEnabled || effectiveNewConfig.mimOuter.isNotEmpty() || effectiveNewConfig.mimInner.isNotEmpty())) {
+            effectiveNewConfig = effectiveNewConfig.copy(mimEnabled = false, mimOuter = "", mimInner = "")
+        }
+        val isUiOnly = oldConfig.copy(connectButtonStyle = effectiveNewConfig.connectButtonStyle, appLanguage = effectiveNewConfig.appLanguage, ipInfoProvider = effectiveNewConfig.ipInfoProvider) == effectiveNewConfig
         if (!isUiOnly && !requireDisconnected()) return
         if (oldConfig.protocol == AetherProtocol.ZERO_TRUST && effectiveNewConfig.protocol != AetherProtocol.ZERO_TRUST) {
             _scrollToZeroTrust.value = false
@@ -585,7 +589,7 @@ class AetherViewModel(platformContext: PlatformContext) : ViewModel() {
             if (state == ConnectionStatus.RUNNING) {
                 fetchPublicIp()
             } else {
-                IpInfoRepository.fetchIpInfo(useProxy = false)
+                IpInfoRepository.fetchIpInfo(useProxy = false, provider = config.value.ipInfoProvider)
             }
         }
     }
@@ -596,13 +600,17 @@ class AetherViewModel(platformContext: PlatformContext) : ViewModel() {
             LogRepository.i("Tor chain pending, deferring IP lookup until Tor proxy is ready", "IpWhois")
             return
         }
+        if (Bridge.mimGuardActive) {
+            LogRepository.i("MIM guard active, deferring IP lookup until final RUNNING", "IpWhois")
+            return
+        }
         val psiphon = ActiveProxyProvider.psiphonProxyUrl
         if (!psiphon.isNullOrEmpty()) {
             val body = psiphon.removePrefix("socks5://").removePrefix("socks://")
             val parts = body.split(":", limit = 2)
             val host = parts.first()
             val port = parts.getOrNull(1)?.toIntOrNull() ?: 3080
-            IpInfoRepository.fetchIpInfo(host, port, useProxy = true)
+            IpInfoRepository.fetchIpInfo(host, port, useProxy = true, provider = cfg.ipInfoProvider)
             return
         }
         val tor = ActiveProxyProvider.torProxyUrl
@@ -611,9 +619,9 @@ class AetherViewModel(platformContext: PlatformContext) : ViewModel() {
             val parts = body.split(":", limit = 2)
             val host = parts.first()
             val port = parts.getOrNull(1)?.toIntOrNull() ?: 3081
-            IpInfoRepository.fetchIpInfo(host, port, useProxy = true)
+            IpInfoRepository.fetchIpInfo(host, port, useProxy = true, provider = cfg.ipInfoProvider)
         } else {
-            IpInfoRepository.fetchIpInfo(cfg.socksHost, cfg.socksPort.toIntOrNull() ?: 1819, useProxy = true)
+            IpInfoRepository.fetchIpInfo(cfg.socksHost, cfg.socksPort.toIntOrNull() ?: 1819, useProxy = true, provider = cfg.ipInfoProvider)
         }
     }
 
@@ -623,6 +631,10 @@ class AetherViewModel(platformContext: PlatformContext) : ViewModel() {
             if (state == ConnectionStatus.RUNNING) {
                 val cfg = config.value
                 if (cfg.isTorActive() && ActiveProxyProvider.torProxyUrl.isNullOrEmpty()) {
+                    PingRepository.reset()
+                    return@launch
+                }
+                if (Bridge.mimGuardActive) {
                     PingRepository.reset()
                     return@launch
                 }
@@ -679,6 +691,12 @@ class AetherViewModel(platformContext: PlatformContext) : ViewModel() {
                             PingRepository.reset()
                             return@collect
                         }
+                        if (Bridge.mimGuardActive) {
+                            ipRetryJob?.cancel()
+                            PingRepository.reset()
+                            LogRepository.i("MIM guard active, deferring IP/ping until final RUNNING", "IpWhois")
+                            return@collect
+                        }
                         val tor = ActiveProxyProvider.torProxyUrl
                         val host: String
                         val port: Int
@@ -717,7 +735,7 @@ class AetherViewModel(platformContext: PlatformContext) : ViewModel() {
                     }
                     ConnectionStatus.STOPPED, ConnectionStatus.FAILED, ConnectionStatus.ERROR -> {
                         ipRetryJob?.cancel()
-                        viewModelScope.launch { IpInfoRepository.fetchIpInfo(useProxy = false) }
+                        viewModelScope.launch { IpInfoRepository.fetchIpInfo(useProxy = false, provider = config.value.ipInfoProvider) }
                         PingRepository.reset()
                     }
                     else -> {

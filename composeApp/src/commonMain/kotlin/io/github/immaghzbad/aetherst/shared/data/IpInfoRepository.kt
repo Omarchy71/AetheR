@@ -1,6 +1,7 @@
 package io.github.immaghzbad.aetherst.shared.data
 
 import io.github.immaghzbad.aetherst.shared.core.NetworkClient
+import io.github.immaghzbad.aetherst.shared.model.IpInfoProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -9,6 +10,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.Request
 import kotlinx.serialization.json.*
 import java.net.InetSocketAddress
@@ -22,14 +24,80 @@ object IpInfoRepository {
     private val json = Json { ignoreUnknownKeys = true }
     private val mutex = kotlinx.coroutines.sync.Mutex()
 
-    suspend fun fetchIpInfo(socksHost: String = "127.0.0.1", socksPort: Int = 1819, useProxy: Boolean = true) {
+    data class ExitCountry(val ip: String, val countryCode: String, val source: String)
+
+    private val geoProviders = setOf(
+        IpInfoProvider.IPSB,
+        IpInfoProvider.IPWHOIS,
+        IpInfoProvider.FREEIPAPI,
+        IpInfoProvider.GEOJS,
+        IpInfoProvider.REALLYFREE,
+        IpInfoProvider.GEOIPLOOKUP,
+        IpInfoProvider.FREE_FREEIPAPI,
+        IpInfoProvider.IFCONFIG,
+        IpInfoProvider.IPINFO
+    )
+
+    private fun directSources(): List<Pair<IpInfoProvider, () -> IpInfo?>> = listOf(
+        IpInfoProvider.IPSB to ::tryDirectIpSb,
+        IpInfoProvider.IPWHOIS to ::tryDirectIpWhoIs,
+        IpInfoProvider.FREEIPAPI to ::tryDirectFreeIpApi,
+        IpInfoProvider.GEOJS to ::tryDirectGeojs,
+        IpInfoProvider.REALLYFREE to ::tryDirectReallyFree,
+        IpInfoProvider.GEOIPLOOKUP to ::tryDirectGeoIpLookup,
+        IpInfoProvider.FREE_FREEIPAPI to ::tryDirectFreeFreeIpApi,
+        IpInfoProvider.IPIFY to ::tryDirectIpify,
+        IpInfoProvider.IFCONFIG to ::tryDirectIfconfig,
+        IpInfoProvider.IPINFO to ::tryDirectIpinfoIo
+    )
+
+    private fun proxySources(socksHost: String, socksPort: Int): List<Pair<IpInfoProvider, () -> IpInfo?>> = listOf(
+        IpInfoProvider.IPSB to { tryViaProxyIpSb(socksHost, socksPort) },
+        IpInfoProvider.IPWHOIS to { tryViaProxyIpWhoIs(socksHost, socksPort) },
+        IpInfoProvider.FREEIPAPI to { tryViaProxyFreeIpApi(socksHost, socksPort) },
+        IpInfoProvider.GEOJS to { tryViaProxyGeojs(socksHost, socksPort) },
+        IpInfoProvider.REALLYFREE to { tryViaProxyReallyFree(socksHost, socksPort) },
+        IpInfoProvider.GEOIPLOOKUP to { tryViaProxyGeoIpLookup(socksHost, socksPort) },
+        IpInfoProvider.FREE_FREEIPAPI to { tryViaProxyFreeFreeIpApi(socksHost, socksPort) },
+        IpInfoProvider.IPIFY to { tryViaProxyIpify(socksHost, socksPort) },
+        IpInfoProvider.IFCONFIG to { tryViaProxyIfconfig(socksHost, socksPort) },
+        IpInfoProvider.IPINFO to { tryViaProxyIpinfoIo(socksHost, socksPort) },
+        IpInfoProvider.AMAZON to { tryViaProxyAmazon(socksHost, socksPort) }
+    )
+
+    suspend fun fetchExitCountry(socksHost: String = "127.0.0.1", socksPort: Int = 1819, useProxy: Boolean = true): ExitCountry? = coroutineScope {
+        val base = if (useProxy) proxySources(socksHost, socksPort) else directSources()
+        val ordered = base.filter { geoProviders.contains(it.first) }.shuffled()
+        if (ordered.isEmpty()) return@coroutineScope null
+        withTimeoutOrNull(18000) {
+            val sources = ordered.map { pair -> async { pair.first to pair.second() } }
+            for (future in sources) {
+                val named = try {
+                    future.await()
+                } catch (_: Throwable) {
+                    continue
+                }
+                val result = named.second
+                val code = result?.countryCode?.trim()?.uppercase() ?: ""
+                val ip = result?.ip?.trim() ?: ""
+                if (ip.isNotEmpty() && code.isNotEmpty()) {
+                    sources.forEach { it.cancel() }
+                    LogRepository.i("Exit country via ${named.first.rawValue}: $ip ($code)", "IpWhois")
+                    return@withTimeoutOrNull ExitCountry(ip, code, named.first.rawValue)
+                }
+            }
+            null
+        }
+    }
+
+    suspend fun fetchIpInfo(socksHost: String = "127.0.0.1", socksPort: Int = 1819, useProxy: Boolean = true, provider: IpInfoProvider = IpInfoProvider.AUTO) {
         mutex.lock()
         try {
             _ipInfo.value = _ipInfo.value.copy(isLoading = true, error = null)
             withContext(Dispatchers.Default) {
                 if (!useProxy) {
                     LogRepository.i("Querying public IP (direct)...", "IpWhois")
-                    val result = fetchParallelDirect()
+                    val result = fetchParallelDirect(provider)
                     if (result != null) {
                         _ipInfo.value = result
                         LogRepository.i("Direct IP: ${result.ip} (${result.country})", "IpWhois")
@@ -39,7 +107,7 @@ object IpInfoRepository {
                     delay(800.milliseconds)
                     for (attempt in 1..4) {
                         LogRepository.i("Querying public IP via tunnel ($socksHost:$socksPort) attempt $attempt...", "IpWhois")
-                        val result = fetchParallelViaProxy(socksHost, socksPort)
+                        val result = fetchParallelViaProxy(socksHost, socksPort, provider)
                         if (result != null) {
                             _ipInfo.value = result
                             LogRepository.i("Tunnel IP: ${result.ip} (${result.country})", "IpWhois")
@@ -66,15 +134,11 @@ object IpInfoRepository {
         }
     }
 
-    private suspend fun fetchParallelDirect(): IpInfo? = coroutineScope {
-        val sources = listOf(
-            async { tryDirectIpSb() },
-            async { tryDirectIpWhoIs() },
-            async { tryDirectFreeIpApi() },
-            async { tryDirectIpify() },
-            async { tryDirectIfconfig() },
-            async { tryDirectIpinfoIo() }
-        )
+    private suspend fun fetchParallelDirect(provider: IpInfoProvider = IpInfoProvider.AUTO): IpInfo? = coroutineScope {
+        val all = directSources()
+        val ordered = if (provider == IpInfoProvider.AUTO) all.shuffled() else all.filter { it.first == provider }
+        if (ordered.isEmpty()) return@coroutineScope null
+        val sources = ordered.map { async { it.second() } }
         for (future in sources) {
             val result = future.await()
             if (result != null) {
@@ -85,16 +149,11 @@ object IpInfoRepository {
         null
     }
 
-    private suspend fun fetchParallelViaProxy(socksHost: String, socksPort: Int): IpInfo? = coroutineScope {
-        val sources = listOf(
-            async { tryViaProxyIpSb(socksHost, socksPort) },
-            async { tryViaProxyIpWhoIs(socksHost, socksPort) },
-            async { tryViaProxyFreeIpApi(socksHost, socksPort) },
-            async { tryViaProxyIpify(socksHost, socksPort) },
-            async { tryViaProxyIfconfig(socksHost, socksPort) },
-            async { tryViaProxyIpinfoIo(socksHost, socksPort) },
-            async { tryViaProxyAmazon(socksHost, socksPort) }
-        )
+    private suspend fun fetchParallelViaProxy(socksHost: String, socksPort: Int, provider: IpInfoProvider = IpInfoProvider.AUTO): IpInfo? = coroutineScope {
+        val all = proxySources(socksHost, socksPort)
+        val ordered = if (provider == IpInfoProvider.AUTO) all.shuffled() else all.filter { it.first == provider }
+        if (ordered.isEmpty()) return@coroutineScope null
+        val sources = ordered.map { async { it.second() } }
         for (future in sources) {
             val result = future.await()
             if (result != null) {
@@ -415,6 +474,170 @@ object IpInfoRepository {
         return try {
             val client = NetworkClient.instance.newBuilder().connectTimeout(8000, java.util.concurrent.TimeUnit.MILLISECONDS).readTimeout(8000, java.util.concurrent.TimeUnit.MILLISECONDS).build()
             val request = Request.Builder().url("https://freeipapi.com/api/json").header("User-Agent", "Mozilla/5.0").build()
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val jsonStr = response.body?.string() ?: return null
+                    val root = json.parseToJsonElement(jsonStr).jsonObject
+                    val ip = root["ipAddress"]?.jsonPrimitive?.content ?: ""
+                    val countryCode = root["countryCode"]?.jsonPrimitive?.content ?: ""
+                    val country = root["countryName"]?.jsonPrimitive?.content ?: "Unknown"
+                    if (ip.isNotEmpty()) IpInfo(ip, country, countryCode, getFlagEmoji(countryCode), false) else null
+                } else null
+            }
+        } catch (_: Throwable) { null }
+    }
+
+    private fun tryViaProxyGeojs(socksHost: String, socksPort: Int): IpInfo? {
+        return try {
+            val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress(socksHost, socksPort))
+            val client = NetworkClient.instance.newBuilder().proxy(proxy).connectTimeout(8000, java.util.concurrent.TimeUnit.MILLISECONDS).readTimeout(8000, java.util.concurrent.TimeUnit.MILLISECONDS).build()
+            val request = Request.Builder().url("https://get.geojs.io/v1/ip/geo.json").header("User-Agent", "Mozilla/5.0").build()
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val jsonStr = response.body?.string() ?: return null
+                    val root = json.parseToJsonElement(jsonStr).jsonObject
+                    val ip = root["ip"]?.jsonPrimitive?.content ?: ""
+                    val country = root["country"]?.jsonPrimitive?.content ?: "Unknown"
+                    val countryCode = root["country_code"]?.jsonPrimitive?.content ?: ""
+                    if (ip.isNotEmpty()) {
+                        LogRepository.i("Geo-data (geojs.io): $ip ($country)", "IpWhois")
+                        IpInfo(ip, country, countryCode, getFlagEmoji(countryCode), false)
+                    } else null
+                } else null
+            }
+        } catch (e: Throwable) {
+            LogRepository.w("geojs.io via SOCKS error: ${e.message}", "IpWhois")
+            null
+        }
+    }
+
+    private fun tryViaProxyReallyFree(socksHost: String, socksPort: Int): IpInfo? {
+        return try {
+            val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress(socksHost, socksPort))
+            val client = NetworkClient.instance.newBuilder().proxy(proxy).connectTimeout(8000, java.util.concurrent.TimeUnit.MILLISECONDS).readTimeout(8000, java.util.concurrent.TimeUnit.MILLISECONDS).build()
+            val request = Request.Builder().url("https://reallyfreegeoip.org/json/").header("User-Agent", "Mozilla/5.0").build()
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val jsonStr = response.body?.string() ?: return null
+                    val root = json.parseToJsonElement(jsonStr).jsonObject
+                    val ip = root["ip"]?.jsonPrimitive?.content ?: ""
+                    val country = root["country_name"]?.jsonPrimitive?.content ?: "Unknown"
+                    val countryCode = root["country_code"]?.jsonPrimitive?.content ?: ""
+                    if (ip.isNotEmpty()) {
+                        LogRepository.i("Geo-data (reallyfreegeoip): $ip ($country)", "IpWhois")
+                        IpInfo(ip, country, countryCode, getFlagEmoji(countryCode), false)
+                    } else null
+                } else null
+            }
+        } catch (e: Throwable) {
+            LogRepository.w("reallyfreegeoip via SOCKS error: ${e.message}", "IpWhois")
+            null
+        }
+    }
+
+    private fun tryViaProxyGeoIpLookup(socksHost: String, socksPort: Int): IpInfo? {
+        return try {
+            val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress(socksHost, socksPort))
+            val client = NetworkClient.instance.newBuilder().proxy(proxy).connectTimeout(8000, java.util.concurrent.TimeUnit.MILLISECONDS).readTimeout(8000, java.util.concurrent.TimeUnit.MILLISECONDS).build()
+            val request = Request.Builder().url("https://json.geoiplookup.io/").header("User-Agent", "Mozilla/5.0").build()
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val jsonStr = response.body?.string() ?: return null
+                    val root = json.parseToJsonElement(jsonStr).jsonObject
+                    val ip = root["ip"]?.jsonPrimitive?.content ?: ""
+                    val country = root["country_name"]?.jsonPrimitive?.content ?: "Unknown"
+                    val countryCode = root["country_code"]?.jsonPrimitive?.content ?: ""
+                    if (ip.isNotEmpty()) {
+                        LogRepository.i("Geo-data (geoiplookup.io): $ip ($country)", "IpWhois")
+                        IpInfo(ip, country, countryCode, getFlagEmoji(countryCode), false)
+                    } else null
+                } else null
+            }
+        } catch (e: Throwable) {
+            LogRepository.w("geoiplookup.io via SOCKS error: ${e.message}", "IpWhois")
+            null
+        }
+    }
+
+    private fun tryViaProxyFreeFreeIpApi(socksHost: String, socksPort: Int): IpInfo? {
+        return try {
+            val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress(socksHost, socksPort))
+            val client = NetworkClient.instance.newBuilder().proxy(proxy).connectTimeout(8000, java.util.concurrent.TimeUnit.MILLISECONDS).readTimeout(8000, java.util.concurrent.TimeUnit.MILLISECONDS).build()
+            val request = Request.Builder().url("https://free.freeipapi.com/api/json").header("User-Agent", "Mozilla/5.0").build()
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val jsonStr = response.body?.string() ?: return null
+                    val root = json.parseToJsonElement(jsonStr).jsonObject
+                    val ip = root["ipAddress"]?.jsonPrimitive?.content ?: ""
+                    val countryCode = root["countryCode"]?.jsonPrimitive?.content ?: ""
+                    val country = root["countryName"]?.jsonPrimitive?.content ?: "Unknown"
+                    if (ip.isNotEmpty()) {
+                        LogRepository.i("Geo-data (free.freeipapi): $ip ($country)", "IpWhois")
+                        IpInfo(ip, country, countryCode, getFlagEmoji(countryCode), false)
+                    } else null
+                } else null
+            }
+        } catch (e: Throwable) {
+            LogRepository.w("free.freeipapi via SOCKS error: ${e.message}", "IpWhois")
+            null
+        }
+    }
+
+    private fun tryDirectGeojs(): IpInfo? {
+        return try {
+            val client = NetworkClient.instance.newBuilder().connectTimeout(8000, java.util.concurrent.TimeUnit.MILLISECONDS).readTimeout(8000, java.util.concurrent.TimeUnit.MILLISECONDS).build()
+            val request = Request.Builder().url("https://get.geojs.io/v1/ip/geo.json").header("User-Agent", "Mozilla/5.0").build()
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val jsonStr = response.body?.string() ?: return null
+                    val root = json.parseToJsonElement(jsonStr).jsonObject
+                    val ip = root["ip"]?.jsonPrimitive?.content ?: ""
+                    val country = root["country"]?.jsonPrimitive?.content ?: "Unknown"
+                    val countryCode = root["country_code"]?.jsonPrimitive?.content ?: ""
+                    if (ip.isNotEmpty()) IpInfo(ip, country, countryCode, getFlagEmoji(countryCode), false) else null
+                } else null
+            }
+        } catch (_: Throwable) { null }
+    }
+
+    private fun tryDirectReallyFree(): IpInfo? {
+        return try {
+            val client = NetworkClient.instance.newBuilder().connectTimeout(8000, java.util.concurrent.TimeUnit.MILLISECONDS).readTimeout(8000, java.util.concurrent.TimeUnit.MILLISECONDS).build()
+            val request = Request.Builder().url("https://reallyfreegeoip.org/json/").header("User-Agent", "Mozilla/5.0").build()
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val jsonStr = response.body?.string() ?: return null
+                    val root = json.parseToJsonElement(jsonStr).jsonObject
+                    val ip = root["ip"]?.jsonPrimitive?.content ?: ""
+                    val country = root["country_name"]?.jsonPrimitive?.content ?: "Unknown"
+                    val countryCode = root["country_code"]?.jsonPrimitive?.content ?: ""
+                    if (ip.isNotEmpty()) IpInfo(ip, country, countryCode, getFlagEmoji(countryCode), false) else null
+                } else null
+            }
+        } catch (_: Throwable) { null }
+    }
+
+    private fun tryDirectGeoIpLookup(): IpInfo? {
+        return try {
+            val client = NetworkClient.instance.newBuilder().connectTimeout(8000, java.util.concurrent.TimeUnit.MILLISECONDS).readTimeout(8000, java.util.concurrent.TimeUnit.MILLISECONDS).build()
+            val request = Request.Builder().url("https://json.geoiplookup.io/").header("User-Agent", "Mozilla/5.0").build()
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val jsonStr = response.body?.string() ?: return null
+                    val root = json.parseToJsonElement(jsonStr).jsonObject
+                    val ip = root["ip"]?.jsonPrimitive?.content ?: ""
+                    val country = root["country_name"]?.jsonPrimitive?.content ?: "Unknown"
+                    val countryCode = root["country_code"]?.jsonPrimitive?.content ?: ""
+                    if (ip.isNotEmpty()) IpInfo(ip, country, countryCode, getFlagEmoji(countryCode), false) else null
+                } else null
+            }
+        } catch (_: Throwable) { null }
+    }
+
+    private fun tryDirectFreeFreeIpApi(): IpInfo? {
+        return try {
+            val client = NetworkClient.instance.newBuilder().connectTimeout(8000, java.util.concurrent.TimeUnit.MILLISECONDS).readTimeout(8000, java.util.concurrent.TimeUnit.MILLISECONDS).build()
+            val request = Request.Builder().url("https://free.freeipapi.com/api/json").header("User-Agent", "Mozilla/5.0").build()
             client.newCall(request).execute().use { response ->
                 if (response.isSuccessful) {
                     val jsonStr = response.body?.string() ?: return null

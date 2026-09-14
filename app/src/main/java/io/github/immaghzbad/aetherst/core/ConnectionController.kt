@@ -8,6 +8,7 @@ import io.github.immaghzbad.aetherst.platform.PlatformContext
 import io.github.immaghzbad.aetherst.platform.getSettings
 import io.github.immaghzbad.aetherst.shared.data.AetherConfigRepository
 import io.github.immaghzbad.aetherst.shared.data.ActiveProxyProvider
+import io.github.immaghzbad.aetherst.shared.data.IpInfoRepository
 import io.github.immaghzbad.aetherst.shared.data.LogRepository
 import io.github.immaghzbad.aetherst.shared.model.SessionTraffic
 import io.github.immaghzbad.aetherst.shared.model.*
@@ -77,6 +78,10 @@ class ConnectionController private constructor(context: Context) : ConnectionCon
 
         @Volatile
         var torChaining: Boolean = false
+            private set
+
+        @Volatile
+        var mimGuardActive: Boolean = false
             private set
 
         private val _isWaitingForCode = MutableStateFlow(false)
@@ -973,6 +978,153 @@ class ConnectionController private constructor(context: Context) : ConnectionCon
     }
 
     private suspend fun startAetherInternal(config: AetherConfig, bindAddress: String, attemptId: Long): Boolean {
+        var effective = config
+        var round = 0
+        var originalLastconn: Map<String, ByteArray>? = null
+        var backupTaken = false
+        var prevOuter = ""
+        var prevInner = ""
+        mimGuardActive = true
+        Bridge.mimGuardActive = true
+        try {
+            while (true) {
+                if (activeAttemptId.get() != attemptId) return false
+                if (round > 0) {
+                    if (!backupTaken) {
+                        originalLastconn = backupAndClearLastconn()
+                        backupTaken = true
+                    } else {
+                        clearLastconn()
+                    }
+                    effective = effective.copy(quickReconnect = false, scanMode = AetherScanMode.BALANCED)
+                    LogRepository.i("[MIM] retry round=$round fresh rescan without saved gateway")
+                }
+                if (!startAetherValidated(effective, bindAddress, attemptId)) {
+                    if (round > 0) restoreLastconn(originalLastconn)
+                    return false
+                }
+                if (activeAttemptId.get() != attemptId) return false
+                if (effective.protocol != AetherProtocol.MASQUE || !effective.mimEnabled) {
+                    return finishCoreStart(effective, attemptId)
+                }
+                val hops = LastMimHops.snapshot()
+                if (round > 0 && hops.first.isNotEmpty() && hops.first == prevOuter && hops.second == prevInner) {
+                    LogRepository.i("[MIM] rescan converged on same edges, keeping tunnel outer=${hops.first} inner=${hops.second.ifEmpty { "auto" }}")
+                    restoreLastconn(originalLastconn)
+                    return finishCoreStart(effective, attemptId)
+                }
+                prevOuter = hops.first
+                prevInner = hops.second
+                val hopOuter = hops.first.ifEmpty { effective.mimOuter.trim().ifEmpty { "auto" } }
+                val hopInner = hops.second.ifEmpty { effective.mimInner.trim().ifEmpty { "auto" } }
+                if (round >= 3) {
+                    LogRepository.i("[MIM] retry budget exhausted, keeping tunnel outer=$hopOuter inner=$hopInner")
+                    restoreLastconn(originalLastconn)
+                    return finishCoreStart(effective, attemptId)
+                }
+                val exit = lookupTunnelExitCountry(effective, attemptId) ?: run {
+                    LogRepository.w("[MIM] exit lookup failed, keeping tunnel outer=$hopOuter inner=$hopInner")
+                    return finishCoreStart(effective, attemptId)
+                }
+                LogRepository.i("[MIM] exit check round=$round outer=$hopOuter inner=$hopInner exit=$exit")
+                if (exit != "IR") {
+                    if (round > 0 && hops.second.isNotEmpty() && hops.second != "auto") persistWorkingInner(hops.second)
+                    return finishCoreStart(effective, attemptId)
+                }
+                round++
+                LogRepository.i("[MIM] Iranian exit, retry $round/3 fresh rescan outer=$hopOuter inner=$hopInner")
+                runCatching { runner.stop() }
+                delay(1000.milliseconds)
+            }
+        } finally {
+            mimGuardActive = false
+            Bridge.mimGuardActive = false
+        }
+    }
+
+    private suspend fun finishCoreStart(config: AetherConfig, attemptId: Long): Boolean {
+        if (torChaining) return true
+        publishCoreActive(config.socksPort.toIntOrNull() ?: 1819, attemptId)
+        return true
+    }
+
+    private suspend fun publishCoreActive(proxyPort: Int, attemptId: Long) {
+        if (activeAttemptId.get() != attemptId) return
+        if (!verifyPortListening("127.0.0.1", proxyPort)) throw IllegalStateException("Proxy port $proxyPort is not listening")
+        delay(3000.milliseconds)
+        if (activeAttemptId.get() != attemptId) return
+        notifyStatusChanged(appContext, ConnectionStatus.RUNNING)
+        startTimer()
+        LogRepository.i("[Controller] Core is active and validated on port $proxyPort")
+    }
+
+    private suspend fun lookupTunnelExitCountry(config: AetherConfig, attemptId: Long): String? {
+        if (activeAttemptId.get() != attemptId) return null
+        return try {
+            val proxyPort = config.socksPort.toIntOrNull() ?: 1819
+            val exit = IpInfoRepository.fetchExitCountry("127.0.0.1", proxyPort, useProxy = true)
+            if (activeAttemptId.get() != attemptId) return null
+            exit?.countryCode?.trim()?.uppercase()?.takeIf { it.isNotEmpty() }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun lastconnFiles(): List<java.io.File> {
+        return try {
+            appContext.filesDir.listFiles()?.filter { it.name.startsWith("aether-") && it.name.contains("lastconn") && it.name.endsWith(".toml") } ?: emptyList()
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun backupAndClearLastconn(): Map<String, ByteArray> {
+        val backup = mutableMapOf<String, ByteArray>()
+        for (f in lastconnFiles()) {
+            try {
+                backup[f.name] = f.readBytes()
+            } catch (_: Exception) {}
+            try {
+                f.delete()
+            } catch (_: Exception) {}
+        }
+        LogRepository.i("[MIM] backed up ${backup.size} lastconn files for fresh rescan")
+        return backup
+    }
+
+    private fun clearLastconn() {
+        for (f in lastconnFiles()) {
+            try {
+                f.delete()
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun restoreLastconn(backup: Map<String, ByteArray>?) {
+        if (backup == null) return
+        clearLastconn()
+        for ((name, bytes) in backup) {
+            try {
+                java.io.File(appContext.filesDir, name).writeBytes(bytes)
+            } catch (_: Exception) {}
+        }
+        LogRepository.i("[MIM] restored ${backup.size} lastconn files")
+    }
+
+    private fun persistWorkingInner(inner: String) {
+        val v = inner.trim()
+        if (v.isEmpty()) return
+        runCatching {
+            val repo = AetherConfigRepository.getInstance(getSettings(PlatformContext(appContext)))
+            val cur = repo.config.value
+            if (cur.mimInner.trim() != v) {
+                repo.updateConfig(cur.copy(mimInner = v))
+                LogRepository.i("[MIM] persisted working inner=$v")
+            }
+        }
+    }
+
+    private suspend fun startAetherValidated(config: AetherConfig, bindAddress: String, attemptId: Long): Boolean {
         val chainingTor = torChaining
         LogRepository.i("[Controller] Starting core at $bindAddress (event-driven, awaiting core verdict)")
         runner.start(config, bindAddress, onCodeRequired = { updateIsWaitingForCode(true) }, inputProvider = { loginCodeChannel.receive() })
@@ -1044,10 +1196,6 @@ class ConnectionController private constructor(context: Context) : ConnectionCon
         }
         notifyStatusChanged(appContext, ConnectionStatus.SOCKS_READY)
         if (!verifyPortListening("127.0.0.1", proxyPort)) throw IllegalStateException("Proxy port $proxyPort is not listening")
-        delay(3000.milliseconds)
-        notifyStatusChanged(appContext, ConnectionStatus.RUNNING)
-        startTimer()
-        LogRepository.i("[Controller] Core is active and validated on port $proxyPort")
         return true
     }
 
@@ -1154,6 +1302,7 @@ class ConnectionController private constructor(context: Context) : ConnectionCon
                 ConnectionStatus.STOPPED -> {
                     TorController.notifyCoreDead()
                     if (current == ConnectionStatus.RUNNING || current == ConnectionStatus.RECONNECTING) {
+                        if (mimGuardActive) return@update current
                         LogRepository.w("[Controller] Core stopped unexpectedly")
                         stopTimer()
                         ConnectionStatus.ERROR

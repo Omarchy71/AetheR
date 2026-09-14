@@ -86,6 +86,22 @@ enum class TorMode(val rawValue: String, val displayName: String) {
 }
 
 @Serializable
+enum class IpInfoProvider(val rawValue: String, val displayName: String) {
+    AUTO("auto", "Auto"),
+    IPSB("ipsb", "ip.sb"),
+    IPWHOIS("ipwhois", "ipwho.is"),
+    FREEIPAPI("freeipapi", "freeipapi.com"),
+    FREE_FREEIPAPI("free_freeipapi", "free.freeipapi.com"),
+    GEOJS("geojs", "geojs.io"),
+    REALLYFREE("reallyfree", "reallyfreegeoip"),
+    GEOIPLOOKUP("geoiplookup", "geoiplookup.io"),
+    IPIFY("ipify", "ipify (IP only)"),
+    IFCONFIG("ifconfig", "ifconfig.me (IP only)"),
+    IPINFO("ipinfo", "ipinfo.io"),
+    AMAZON("amazon", "Amazon (IP only)")
+}
+
+@Serializable
 enum class ConnectionMode {
     TUNNEL,
     PROXY_ONLY,
@@ -236,6 +252,7 @@ data class AetherConfig(
     val tcpConnectSecs: Int = 0,
     val maxClients: Int = 0,
     val pingUrl: String = "https://www.gstatic.com/generate_204",
+    val ipInfoProvider: IpInfoProvider = IpInfoProvider.AUTO,
     val connectButtonStyle: String = "swipe",
     val appLanguage: String = "auto"
 ) {

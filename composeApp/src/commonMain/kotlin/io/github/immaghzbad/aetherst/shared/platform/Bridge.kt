@@ -13,6 +13,9 @@ interface BridgeContract {
 
 object Bridge : BridgeContract {
     var submitLoginCode: ((String) -> Unit)? = null
+
+    @Volatile
+    var mimGuardActive: Boolean = false
     
     override val statusOverride = MutableStateFlow<ConnectionStatus?>(null)
     override val trafficOverride = MutableStateFlow<SessionTraffic?>(null)

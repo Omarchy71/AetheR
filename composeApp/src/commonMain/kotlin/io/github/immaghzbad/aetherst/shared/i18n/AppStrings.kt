@@ -474,6 +474,7 @@ interface AppStrings {
     val CLOAK_LOG_LEVEL_TITLE: String
     val CLOAK_ABOUT_DESC: String
     val PING_URL_LABEL: String
+    val IP_INFO_PROVIDER_LABEL: String
     val CHAIN_EXTERNAL_PROXY: String
     val CHAIN_EXTERNAL_PROXY_SUB: String
     val PROXY_TYPE: String

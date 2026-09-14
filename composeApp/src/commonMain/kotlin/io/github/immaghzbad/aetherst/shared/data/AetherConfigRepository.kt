@@ -200,6 +200,7 @@ class AetherConfigRepository private constructor(private val settings: Settings)
             tcpConnectSecs = settings.getInt("${prefix}tcp_connect_secs", 0),
             maxClients = settings.getInt("${prefix}max_clients", 0),
             pingUrl = sanitizePingUrl(settings.getString("${prefix}ping_url", "https://www.gstatic.com/generate_204")),
+            ipInfoProvider = sanitizeIpInfoProvider(settings.getString("${prefix}ip_info_provider", "AUTO")),
             ztStaySignedIn = settings.getBoolean("${prefix}zt_stay_signed_in", true),
             ztTokenExpiry = settings.getString("${prefix}zt_token_expiry", "0").toLongOrNull() ?: 0,
             connectButtonStyle = sanitizeConnectButtonStyle(settings.getString("${prefix}connect_button_style", "swipe")),
@@ -276,6 +277,10 @@ class AetherConfigRepository private constructor(private val settings: Settings)
 
     private fun sanitizeTorMode(value: String): TorMode {
         return try { TorMode.valueOf(value.uppercase()) } catch (_: Exception) { TorMode.TOR }
+    }
+
+    private fun sanitizeIpInfoProvider(value: String): IpInfoProvider {
+        return try { IpInfoProvider.valueOf(value.uppercase()) } catch (_: Exception) { IpInfoProvider.AUTO }
     }
 
     private fun sanitizeTorBridgesMode(value: String): String {
@@ -436,6 +441,7 @@ class AetherConfigRepository private constructor(private val settings: Settings)
         settings.putInt("${prefix}tcp_connect_secs", cfg.tcpConnectSecs.coerceIn(0, 600))
         settings.putInt("${prefix}max_clients", cfg.maxClients.coerceIn(0, 65536))
         settings.putString("${prefix}ping_url", sanitizePingUrl(cfg.pingUrl))
+        settings.putString("${prefix}ip_info_provider", cfg.ipInfoProvider.name)
         settings.putBoolean("${prefix}zt_stay_signed_in", cfg.ztStaySignedIn)
         settings.putString("${prefix}zt_token_expiry", cfg.ztTokenExpiry.toString())
         settings.putString("${prefix}connect_button_style", sanitizeConnectButtonStyle(cfg.connectButtonStyle))

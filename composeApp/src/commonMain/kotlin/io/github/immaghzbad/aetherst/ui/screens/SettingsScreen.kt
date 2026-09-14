@@ -115,6 +115,7 @@ import io.github.immaghzbad.aetherst.shared.model.AetherPerfProfile
 import io.github.immaghzbad.aetherst.shared.model.AetherProtocol
 import io.github.immaghzbad.aetherst.shared.model.AetherScanMode
 import io.github.immaghzbad.aetherst.shared.model.ConnectionMode
+import io.github.immaghzbad.aetherst.shared.model.IpInfoProvider
 import io.github.immaghzbad.aetherst.shared.model.TunnelEngine
 import io.github.immaghzbad.aetherst.shared.ui.components.AppDivider
 import io.github.immaghzbad.aetherst.shared.ui.components.IosActionRow
@@ -575,6 +576,7 @@ private fun encodeUpstreamCredential(s: String): String = s.replace("@", "%40").
     val strings = LocalAppStrings.current
     IosGroupCard { Column {
         IosInputFieldRow(icon = Icons.Default.Speed, iconBg = AppPalette.statusScanning, label = strings.PING_URL_LABEL, value = config.pingUrl, onValueChange = { onUpdateConfig(config.copy(pingUrl = it)) }, placeholder = "https://www.gstatic.com/generate_204", testTag = "ping_url_input"); AppDivider()
+        IosPickerRow(icon = Icons.Default.Public, iconBg = IosActiveBlue, title = strings.IP_INFO_PROVIDER_LABEL, value = config.ipInfoProvider.displayName, options = IpInfoProvider.entries.map { it.displayName }, onOptionSelected = { onUpdateConfig(config.copy(ipInfoProvider = IpInfoProvider.entries[it])) }); AppDivider()
         val logLevelOptions = AetherLogLevel.entries.map { it.displayName }
         val logLevelLocalized = mapOf("off" to strings.LOG_LEVEL_OFF, "error" to strings.LOG_LEVEL_ERROR, "warn" to strings.LOG_LEVEL_WARN, "info" to strings.LOG_LEVEL_INFO, "debug" to strings.LOG_LEVEL_DEBUG)
         IosPickerRow(icon = Icons.Default.BugReport, iconBg = AppPalette.debugCyan, title = strings.APP_SYSTEM_LOGGING, value = logLevelLocalized[config.appLogLevel.rawValue] ?: config.appLogLevel.displayName.substringBefore(" ("), options = logLevelLocalized.values.toList(), onOptionSelected = { idx -> val key = logLevelLocalized.keys.toList()[idx]; val level = AetherLogLevel.entries.find { it.rawValue == key } ?: AetherLogLevel.INFO; onUpdateConfig(config.copy(appLogLevel = level)) }); AppDivider()

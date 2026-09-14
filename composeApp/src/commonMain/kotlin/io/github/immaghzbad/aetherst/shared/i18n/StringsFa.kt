@@ -471,6 +471,7 @@ object StringsFa : AppStrings {
     override val CLOAK_LOG_LEVEL_TITLE = "سطح لاگ کلاک"
     override val CLOAK_ABOUT_DESC = "کلاک یه ترفند گول‌زن واسه MASQUE روی H2 (TCP/TLS)ـه. قبل اینکه دست‌دادن اصلی TLS شروع بشه، چند تا ClientHello الکی با TTL کم و SNI های معروف — مثلا www.bing.com — می‌فرسته که وسط راه عمرشون تموم می‌شه و DPI فقط همون الکی‌ها رو می‌بینه، بعدش دست‌دادن واقعی با SNI اصلی خودت رو می‌فرسته. این‌جوری SNI واقعی‌ت از دید فیلترهای SNI قایم می‌مونه. تو اندروید با libcloak.so داخلی میاد بالا، تو ویندوز هم یا با cloak.exe یا با رله Kotlin داخلی با همون تنظیمات اجرا می‌شه. فقط با MASQUE + H2 Fallback روی TCP جواب می‌ده و به درد وقتی می‌خوره که MASQUE مستقیم به خاطر گیر دادن به SNI وصل نمی‌شه ولی خود مسیر هنوز بازه. اگه MASQUE مستقیم همین‌جوری هم وصل می‌شه، کلاک فقط الکی بسته اضافه و جیتر می‌ندازه و هیچ سودی نداره. لاگ‌هاشم تو صفحه لاگ‌ها با برچسب CloakCore می‌بینی."
     override val PING_URL_LABEL = "آدرس Ping (generate_204)"
+    override val IP_INFO_PROVIDER_LABEL = "سرویس موقعیت (ارائه‌دهنده اطلاعات IP)"
     override val CHAIN_EXTERNAL_PROXY = "پراکسی خارجی زنجیره"
     override val CHAIN_EXTERNAL_PROXY_SUB = "از طریق پراکسی SOCKS/HTTP محلی (یک برنامه دیگر) مسیریابی کن"
     override val PROXY_TYPE = "نوع پراکسی"
