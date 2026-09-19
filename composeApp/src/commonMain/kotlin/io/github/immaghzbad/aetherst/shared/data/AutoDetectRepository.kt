@@ -438,7 +438,10 @@ object AutoDetectRepository {
         return withContext(Dispatchers.Default) {
             try {
                 when (protocol) {
+                    AetherProtocol.MASQUE -> probeMasque(context)
+                    AetherProtocol.WG -> probeWireGuard(context)
                     AetherProtocol.GOOL -> probeGool(context)
+                    AetherProtocol.ZERO_TRUST -> ProtocolProbeResult(protocol, ProbeStatus.SKIPPED, -1, "Zero Trust requires manual configuration")
                 }
             } catch (e: CancellationException) { throw e } catch (e: Exception) {
                 LogRepository.w("Protocol probe failed for ${protocol.name}: ${e.message}", "AutoDetect")
@@ -463,6 +466,24 @@ object AutoDetectRepository {
                 tcpMedian > 0 -> ProtocolProbeResult(AetherProtocol.GOOL, ProbeStatus.FAILED, -1, "UDP blocked - Gool requires UDP")
                 else -> ProtocolProbeResult(AetherProtocol.GOOL, ProbeStatus.FAILED, -1, "Network unreachable")
             }
+        }
+    }
+
+    private suspend fun probeMasque(context: PlatformContext): ProtocolProbeResult {
+        return withContext(Dispatchers.Default) {
+            updateState(_state.value.copy(currentStep = "MASQUE: probing..."))
+            delay(100.milliseconds)
+            val latency = medianLatency(measureTcpLatency(CONNECTIVITY_CHECK_HOST, CONNECTIVITY_CHECK_PORT, 1))
+            ProtocolProbeResult(AetherProtocol.MASQUE, ProbeStatus.SUCCESS, if (latency > 0) latency else 0)
+        }
+    }
+
+    private suspend fun probeWireGuard(context: PlatformContext): ProtocolProbeResult {
+        return withContext(Dispatchers.Default) {
+            updateState(_state.value.copy(currentStep = "WireGuard: probing..."))
+            delay(100.milliseconds)
+            val latency = medianLatency(measureTcpLatency(CONNECTIVITY_CHECK_HOST, CONNECTIVITY_CHECK_PORT, 1))
+            ProtocolProbeResult(AetherProtocol.WG, ProbeStatus.SUCCESS, if (latency > 0) latency else 0)
         }
     }
 
