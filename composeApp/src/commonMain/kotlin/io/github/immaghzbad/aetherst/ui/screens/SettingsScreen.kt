@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.AltRoute
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.automirrored.filled.Rule
@@ -53,7 +54,6 @@ import androidx.compose.material.icons.filled.NetworkCheck
 import androidx.compose.material.icons.filled.Numbers
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PhoneAndroid
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.Refresh
@@ -117,6 +117,7 @@ import io.github.immaghzbad.aetherst.shared.model.AetherProtocol
 import io.github.immaghzbad.aetherst.shared.model.AetherScanMode
 import io.github.immaghzbad.aetherst.shared.model.AutoConnectSettings
 import io.github.immaghzbad.aetherst.shared.model.ConnectionMode
+import io.github.immaghzbad.aetherst.shared.model.IpInfoProvider
 import io.github.immaghzbad.aetherst.shared.model.TunnelEngine
 import io.github.immaghzbad.aetherst.shared.ui.components.AppDivider
 import io.github.immaghzbad.aetherst.shared.ui.components.IosActionRow
@@ -142,6 +143,7 @@ enum class SettingsPage(val title: String) {
     PRESETS("Configuration Profiles"),
     CONNECTION("Connection & Tunneling"),
     PROTOCOL("Protocol & Transport"),
+    ZEROTRUST("Cloudflare Zero Trust"),
     NETWORK("Network Parameters"),
     SECURITY("Security & Reliability"),
     AUTO_CONNECT("Auto-Connect & Recovery"),
@@ -238,6 +240,9 @@ fun SettingsScreen(
         item { CategoryCard(icon = Icons.Default.Tune, iconBg = AppPalette.textSecondary, title = strings.CAT_CONFIGURATION_PROFILES, subtitle = strings.CAT_CONFIGURATION_PROFILES_SUB, onClick = { currentPage = SettingsPage.PRESETS }) }
         item { CategoryCard(icon = Icons.Default.VpnLock, iconBg = AppPalette.statusConnected, title = strings.CAT_CONNECTION_TUNNELING, subtitle = strings.CAT_CONNECTION_TUNNELING_SUB, onClick = { currentPage = SettingsPage.CONNECTION }) }
         item { CategoryCard(icon = Icons.Default.Shield, iconBg = IosActiveBlue, title = strings.CAT_PROTOCOL_TRANSPORT, subtitle = strings.CAT_PROTOCOL_TRANSPORT_SUB, onClick = { currentPage = SettingsPage.PROTOCOL }) }
+        if (config.protocol == AetherProtocol.ZERO_TRUST) {
+            item { CategoryCard(icon = Icons.Default.Business, iconBg = AppPalette.accentVariant, title = strings.CAT_ZEROTRUST, subtitle = strings.CAT_ZEROTRUST_SUB, onClick = { currentPage = SettingsPage.ZEROTRUST }) }
+        }
         item { CategoryCard(icon = Icons.Default.Language, iconBg = IosActiveBlue, title = strings.CAT_NETWORK_PARAMETERS, subtitle = strings.CAT_NETWORK_PARAMETERS_SUB, onClick = { currentPage = SettingsPage.NETWORK }) }
         item { CategoryCard(icon = Icons.Default.Lock, iconBg = AppPalette.statusError, title = strings.CAT_SECURITY_RELIABILITY, subtitle = strings.CAT_SECURITY_RELIABILITY_SUB, onClick = { currentPage = SettingsPage.SECURITY }) }
         item { CategoryCard(icon = Icons.Default.Repeat, iconBg = AppPalette.statusConnected, title = strings.CAT_AUTO_CONNECT, subtitle = strings.CAT_AUTO_CONNECT_SUB, onClick = { currentPage = SettingsPage.AUTO_CONNECT }) }
@@ -266,6 +271,7 @@ private fun CategoryCard(icon: ImageVector, iconBg: Color, title: String, subtit
 @Composable
 private fun SettingsSubPage(page: SettingsPage, config: AetherConfig, isBatteryOptimized: Boolean, onBack: () -> Unit, onUpdateConfig: (AetherConfig) -> Unit, onUpdateTunnelEngine: (TunnelEngine) -> Unit, onApplyPreset: (String) -> Unit, onOpenSplitTunneling: () -> Unit, onOpenRoutingRules: () -> Unit, onRequestBatteryOptimization: () -> Unit, onOpenVpnSettings: () -> Unit, onResetAll: () -> Unit, onExportBackup: () -> Unit, onImportBackup: () -> Unit, onOptimizeMtu: () -> Unit, isOptimizingMtu: Boolean, onShowToast: (String, Boolean) -> Unit, bottomContentPadding: Dp, onOpenDnsOptimizer: () -> Unit = {}, loadAutoConnectSettings: () -> AutoConnectSettings = { AutoConnectSettings() }, saveAutoConnectSettings: (AutoConnectSettings) -> Unit = {}) {
     var showResetDialog by remember { mutableStateOf(false) }
+    var showAdvancedZt by remember { mutableStateOf(false) }
     val isAndroid = remember { try { Class.forName("android.os.Build"); true } catch(_: Throwable) { false } }
     val focusManager = LocalFocusManager.current
 
@@ -280,10 +286,11 @@ private fun SettingsSubPage(page: SettingsPage, config: AetherConfig, isBatteryO
                     SettingsPage.PRESETS -> strings.CAT_CONFIGURATION_PROFILES
                     SettingsPage.CONNECTION -> strings.CAT_CONNECTION_TUNNELING
                     SettingsPage.PROTOCOL -> strings.CAT_PROTOCOL_TRANSPORT
+                    SettingsPage.ZEROTRUST -> strings.CAT_ZEROTRUST
                     SettingsPage.NETWORK -> strings.CAT_NETWORK_PARAMETERS
-                SettingsPage.SECURITY -> strings.CAT_SECURITY_RELIABILITY
-                SettingsPage.AUTO_CONNECT -> strings.CAT_AUTO_CONNECT
-                SettingsPage.DIAGNOSTICS -> strings.CAT_DIAGNOSTICS_CORE
+                    SettingsPage.SECURITY -> strings.CAT_SECURITY_RELIABILITY
+                    SettingsPage.AUTO_CONNECT -> strings.CAT_AUTO_CONNECT
+                    SettingsPage.DIAGNOSTICS -> strings.CAT_DIAGNOSTICS_CORE
                     SettingsPage.HEV_ENGINE -> strings.CAT_HEV_ENGINE
                     SettingsPage.SYSTEM -> strings.CAT_SYSTEM_MAINTENANCE
                     SettingsPage.INTERFACE -> strings.CAT_USER_INTERFACE
@@ -295,6 +302,7 @@ private fun SettingsSubPage(page: SettingsPage, config: AetherConfig, isBatteryO
                 SettingsPage.PRESETS -> item { PresetPage(config, onApplyPreset, onShowToast) }
                 SettingsPage.CONNECTION -> item { ConnectionPage(config, isAndroid, onUpdateConfig, onUpdateTunnelEngine, onOpenSplitTunneling, onOpenRoutingRules) }
                 SettingsPage.PROTOCOL -> item { ProtocolPage(config, onUpdateConfig, onOptimizeMtu, isOptimizingMtu) }
+                SettingsPage.ZEROTRUST -> item { ZeroTrustPage(config, showAdvancedZt, onUpdateConfig) { showAdvancedZt = it } }
                 SettingsPage.NETWORK -> item { NetworkPage(config, onUpdateConfig, onShowToast, onOpenDnsOptimizer) }
                 SettingsPage.SECURITY -> item { SecurityPage(config, isAndroid, isBatteryOptimized, onUpdateConfig, onRequestBatteryOptimization) }
                 SettingsPage.AUTO_CONNECT -> item { AutoConnectPage(isAndroid, loadAutoConnectSettings, saveAutoConnectSettings) }
@@ -351,6 +359,16 @@ private fun SettingsSubPage(page: SettingsPage, config: AetherConfig, isBatteryO
             AppDivider()
         }
         IosPickerRow(icon = Icons.AutoMirrored.Filled.AltRoute, iconBg = IosActiveBlue, title = strings.DOMAIN_IP_ROUTING, value = "${config.routingRules.size} ${strings.ROUTING_RULES_TITLE}", options = emptyList(), onOptionSelected = {}, onClickOverride = onOpenRoutingRules)
+        if (isAndroid) {
+            AppDivider()
+            val providerOptions = listOf("Psiphon", "Tor")
+            val providerIdx = if (config.chainProvider == io.github.immaghzbad.aetherst.shared.model.ChainProvider.TOR) 1 else 0
+            IosPickerRow(icon = Icons.Default.Shield, iconBg = AppPalette.accentVariant, title = strings.CHAIN_PROVIDER, value = providerOptions[providerIdx], options = providerOptions, onOptionSelected = { idx -> val provider = if (idx == 1) io.github.immaghzbad.aetherst.shared.model.ChainProvider.TOR else io.github.immaghzbad.aetherst.shared.model.ChainProvider.PSIPHON; onUpdateConfig(config.copy(chainProvider = provider, psiphonEnabled = if (provider == io.github.immaghzbad.aetherst.shared.model.ChainProvider.TOR) false else config.psiphonEnabled, torEnabled = if (provider == io.github.immaghzbad.aetherst.shared.model.ChainProvider.PSIPHON) false else config.torEnabled)) })
+            if (config.chainProvider == io.github.immaghzbad.aetherst.shared.model.ChainProvider.PSIPHON) {
+                AppDivider()
+                IosSwitchRow(icon = Icons.Default.Shield, iconBg = IosActiveGreen, title = strings.PSIPHON_ONLY, subtitle = strings.PSIPHON_ONLY_SUB, checked = config.psiphonOnly, onCheckedChange = { onUpdateConfig(config.copy(psiphonOnly = it)) }, testTag = "switch_psiphon_only")
+            }
+        }
         if (isAndroid) { AppDivider(); IosSwitchRow(icon = Icons.Default.Share, iconBg = AppPalette.accentVariantAlt, title = strings.SHARE_HOTSPOT, subtitle = strings.SHARE_HOTSPOT_SUB, checked = config.shareHotspot, onCheckedChange = { onUpdateConfig(config.copy(shareHotspot = it)) }, testTag = "switch_share_hotspot"); if (config.shareHotspot) HotspotInfo(config) }
     } }
 }
@@ -398,10 +416,10 @@ private fun SettingsSubPage(page: SettingsPage, config: AetherConfig, isBatteryO
     val strings = LocalAppStrings.current
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         IosGroupCard { Column {
-            Text(config.protocol.displayName, fontWeight = FontWeight.Bold, color = Color.White, fontSize = 15.sp, modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp))
-
+            IosPickerRow(icon = Icons.Default.VpnLock, iconBg = IosActiveBlue, title = strings.TRANSPORT_PROTOCOL, value = config.protocol.displayName, options = AetherProtocol.entries.map { it.displayName }, onOptionSelected = { onUpdateConfig(config.copy(protocol = AetherProtocol.entries[it])) })
+            if (config.protocol == AetherProtocol.MASQUE) { AppDivider(); IosSwitchRow(icon = Icons.Default.Http, iconBg = IosActiveBlue, title = strings.HTTP2_FALLBACK, subtitle = strings.HTTP2_FALLBACK_SUB, checked = config.h2Mode, onCheckedChange = { onUpdateConfig(config.copy(h2Mode = it)) }, testTag = "switch_h2_mode"); AppDivider(); IosSwitchRow(icon = Icons.Default.VerticalSplit, iconBg = AppPalette.accentVariant, title = strings.PACKET_FRAGMENTATION, subtitle = strings.PACKET_FRAGMENTATION_SUB, checked = config.h2Fragment, onCheckedChange = { onUpdateConfig(config.copy(h2Fragment = it)) }, testTag = "switch_fragment"); if (config.h2Fragment) { IosInputFieldRow(icon = Icons.Default.Straighten, iconBg = IosSecondaryLabel, label = strings.FRAGMENT_SIZE, value = config.fragmentSize, onValueChange = { onUpdateConfig(config.copy(fragmentSize = it)) }, placeholder = "16-32", testTag = "fragment_size_input"); AppDivider(); IosInputFieldRow(icon = Icons.Default.Timer, iconBg = IosSecondaryLabel, label = strings.FRAGMENT_DELAY, value = config.fragmentDelay, onValueChange = { onUpdateConfig(config.copy(fragmentDelay = it)) }, placeholder = "2-10", testTag = "fragment_delay_input"); AppDivider() }; IosSwitchRow(icon = Icons.Default.EnhancedEncryption, iconBg = IosActiveGreen, title = strings.ECH, subtitle = strings.ECH_SUB, checked = config.echEnabled, onCheckedChange = { onUpdateConfig(config.copy(echEnabled = it)) }, testTag = "switch_ech_enabled"); AppDivider(); IosInputFieldRow(icon = Icons.Default.Straighten, iconBg = IosSecondaryLabel, label = strings.MASQUE_INNER_MTU, value = if (config.masqueMtu > 0) config.masqueMtu.toString() else "", onValueChange = { onUpdateConfig(config.copy(masqueMtu = it.toIntOrNull()?.coerceIn(0, 9000) ?: 0)) }, placeholder = "Auto", keyboardType = KeyboardType.Number, testTag = "masque_mtu_input"); AppDivider(); IosSwitchRow(icon = Icons.Default.SwapHoriz, iconBg = Color(0xFF30B0C7), title = strings.MIM_ENABLE, subtitle = strings.MIM_ENABLE_SUB, checked = config.mimEnabled, onCheckedChange = { onUpdateConfig(config.copy(mimEnabled = it)) }, testTag = "switch_mim_enabled"); if (config.mimEnabled) { AppDivider(); IosInputFieldRow(icon = Icons.AutoMirrored.Filled.Send, iconBg = AppPalette.accentVariant, label = strings.MIM_OUTER, value = config.mimOuter, onValueChange = { onUpdateConfig(config.copy(mimOuter = it.trim())) }, placeholder = "e.g. 162.159.192.1:443", testTag = "mim_outer_input"); AppDivider(); IosInputFieldRow(icon = Icons.AutoMirrored.Filled.Send, iconBg = AppPalette.accentVariant, label = strings.MIM_INNER, value = config.mimInner, onValueChange = { onUpdateConfig(config.copy(mimInner = it.trim())) }, placeholder = "e.g. 188.114.96.1:443", testTag = "mim_inner_input"); AppDivider(); IosSwitchRow(icon = Icons.Default.Refresh, iconBg = AppPalette.statusScanning, title = strings.MIM_SCAN, subtitle = null, checked = config.mimScan, onCheckedChange = { onUpdateConfig(config.copy(mimScan = it)) }, testTag = "switch_mim_scan"); AppDivider() }; IosSwitchRow(icon = Icons.Default.Speed, iconBg = AppPalette.statusScanning, title = strings.QUIC_V2_PROBE, subtitle = strings.QUIC_V2_PROBE_SUB, checked = config.quicV2Probe, onCheckedChange = { onUpdateConfig(config.copy(quicV2Probe = it)) }, testTag = "switch_quic_v2"); AppDivider(); IosInputFieldRow(icon = Icons.Default.Shield, iconBg = IosSecondaryLabel, label = strings.FIREWALL_MARK, value = config.firewallMark, onValueChange = { onUpdateConfig(config.copy(firewallMark = it.trim())) }, placeholder = "0xff", testTag = "firewall_mark_input"); AppDivider() }
             IosSwitchRow(icon = Icons.Default.DataUsage, iconBg = AppPalette.statusScanning, title = strings.DISABLE_DATA_VERIFICATION, subtitle = strings.DISABLE_DATA_VERIFICATION_SUB, checked = config.noDataCheck, onCheckedChange = { onUpdateConfig(config.copy(noDataCheck = it)) }, testTag = "switch_no_data_check"); AppDivider()
-            val availNoise = listOf(AetherNoise.BALANCED, AetherNoise.AGGRESSIVE, AetherNoise.LIGHT, AetherNoise.OFF)
+            val availNoise = if (config.protocol == AetherProtocol.MASQUE) listOf(AetherNoise.FIREWALL, AetherNoise.GFW, AetherNoise.OFF) else listOf(AetherNoise.BALANCED, AetherNoise.AGGRESSIVE, AetherNoise.LIGHT, AetherNoise.OFF)
             IosPickerRow(icon = Icons.Default.Tune, iconBg = AppPalette.accentVariantAlt, title = strings.BYPASS_OBFUSCATION, value = config.noise.displayName.substringBefore(" ("), options = availNoise.map { it.displayName }, onOptionSelected = { onUpdateConfig(config.copy(noise = availNoise[it])) }); AppDivider()
             IosPickerRow(icon = Icons.Default.NetworkCheck, iconBg = AppPalette.statusScanning, title = strings.SPEED_STRATEGY, value = config.scanMode.name.lowercase().replaceFirstChar { it.uppercase() }, options = AetherScanMode.entries.map { "${it.name.lowercase().replaceFirstChar { c -> c.uppercase() }} (${it.description})" }, onOptionSelected = { onUpdateConfig(config.copy(scanMode = AetherScanMode.entries[it])) }); AppDivider()
             IosPickerRow(icon = Icons.AutoMirrored.Filled.AltRoute, iconBg = AppPalette.accentVariant, title = strings.NETWORK_STACK, value = config.ipMode.rawValue, options = AetherIpMode.entries.map { it.displayName }, onOptionSelected = { onUpdateConfig(config.copy(ipMode = AetherIpMode.entries[it])) }); AppDivider()
@@ -420,7 +438,14 @@ private fun SettingsSubPage(page: SettingsPage, config: AetherConfig, isBatteryO
                     }
                     AppDivider()
                 }
-
+                if (config.protocol != AetherProtocol.MASQUE || !config.h2Mode) {
+                    Row(modifier = Modifier.fillMaxWidth().background(AppPalette.statusScanning.copy(alpha = 0.12f)).padding(10.dp), verticalAlignment = Alignment.Top) {
+                        Icon(Icons.Default.Info, null, tint = AppPalette.statusScanning, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("${strings.CLOAK_H2_ONLY_INFO} ${config.protocol.displayName} ${if (config.h2Mode) "H2" else "H3"}", color = AppPalette.statusScanning, fontSize = 11.sp, lineHeight = 14.sp)
+                    }
+                    AppDivider()
+                }
                 IosInputFieldRow(icon = Icons.Default.Public, iconBg = IosActiveGreen, label = strings.CLOAK_DECOY_SNI_LIST, value = config.cloakSniList, onValueChange = { onUpdateConfig(config.copy(cloakSniList = it)) }, placeholder = "www.bing.com,www.hcaptcha.com", testTag = "cloak_sni_input"); AppDivider()
                 IosInputFieldRow(icon = Icons.Default.Timer, iconBg = AppPalette.statusScanning, label = strings.CLOAK_TTL_LIST, value = config.cloakTtlList, onValueChange = { onUpdateConfig(config.copy(cloakTtlList = it)) }, placeholder = "4,5,6,8", testTag = "cloak_ttl_input"); AppDivider()
                 Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -445,11 +470,42 @@ private fun SettingsSubPage(page: SettingsPage, config: AetherConfig, isBatteryO
     }
 }
 
+@Composable private fun ZeroTrustPage(config: AetherConfig, showAdvanced: Boolean, onUpdateConfig: (AetherConfig) -> Unit, onToggleAdvanced: (Boolean) -> Unit) {
+    val strings = LocalAppStrings.current
+    val isZt = config.protocol == AetherProtocol.ZERO_TRUST
+    val ztError = if (isZt) config.zeroTrustError() else null
+    val hasAuth = config.teamName.isNotBlank() &&
+        (config.accessEmail.isNotBlank() || config.accessId.isNotBlank() || config.accessSecret.isNotBlank() || config.accessToken.isNotBlank())
+    IosGroupCard { Column {
+        IosInputFieldRow(icon = Icons.Default.Business, iconBg = AppPalette.accentVariant, label = if (isZt) strings.ZT_TEAM_NAME_REQUIRED else strings.ZT_TEAM_NAME, value = config.teamName, onValueChange = { onUpdateConfig(config.copy(teamName = it)) }, placeholder = "e.g. my-org", testTag = "zt_team_input"); AppDivider()
+        IosInputFieldRow(icon = Icons.Default.Language, iconBg = IosActiveBlue, label = strings.ZT_ACCESS_EMAIL, value = config.accessEmail, onValueChange = { onUpdateConfig(config.copy(accessEmail = it)) }, placeholder = "user@example.com", testTag = "zt_email_input"); AppDivider()
+        IosSwitchRow(icon = Icons.Default.Shield, iconBg = IosActiveGreen, title = strings.ZT_GATEWAY, subtitle = strings.ZT_GATEWAY_SUB, checked = config.useGateway, onCheckedChange = { onUpdateConfig(config.copy(useGateway = it)) }, testTag = "switch_zt_gateway"); AppDivider()
+        IosSwitchRow(icon = Icons.Default.CheckCircle, iconBg = IosActiveBlue, title = strings.ZT_STAY_SIGNED_IN, subtitle = strings.ZT_STAY_SIGNED_IN_SUB, checked = config.ztStaySignedIn, onCheckedChange = { onUpdateConfig(config.copy(ztStaySignedIn = it)) }, testTag = "switch_zt_stay_signed_in"); AppDivider()
+        if (hasAuth) {
+            Row(modifier = Modifier.fillMaxWidth().clickable { onUpdateConfig(config.copy(teamName = "", accessEmail = "", accessId = "", accessSecret = "", accessToken = "", ztTokenExpiry = 0, ztStaySignedIn = false)) }.padding(horizontal = 16.dp, vertical = 14.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) { Row(verticalAlignment = Alignment.CenterVertically) { IosIconBadge(icon = Icons.AutoMirrored.Filled.Logout, backgroundColor = AppPalette.statusError); Spacer(modifier = Modifier.width(12.dp)); Text(strings.ZT_SIGN_OUT, fontWeight = FontWeight.Medium, color = AppPalette.statusError, fontSize = 15.sp) } }
+        }
+        Row(modifier = Modifier.fillMaxWidth().clickable { onToggleAdvanced(!showAdvanced) }.padding(horizontal = 16.dp, vertical = 14.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) { Row(verticalAlignment = Alignment.CenterVertically) { IosIconBadge(icon = Icons.Default.Lock, backgroundColor = IosSecondaryLabel); Spacer(modifier = Modifier.width(12.dp)); Text(strings.ZT_ADVANCED_AUTH, fontWeight = FontWeight.Medium, color = Color.White, fontSize = 15.sp) }; Icon(if (showAdvanced) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null, tint = IosSecondaryLabel, modifier = Modifier.size(18.dp)) }
+        AnimatedVisibility(visible = showAdvanced, enter = fadeIn() + expandVertically(), exit = fadeOut() + shrinkVertically()) { Column(modifier = Modifier.fillMaxWidth().background(IosGroupBg.copy(alpha = 0.4f)).padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) { Text(strings.ZT_CHOOSE_ONE_METHOD, color = IosSecondaryLabel, fontSize = 12.sp); IosInputField(label = strings.ZT_ACCESS_ID, value = config.accessId, onValueChange = { onUpdateConfig(config.copy(accessId = it)) }, placeholder = "Required for Service Tokens", testTag = "zt_access_id"); IosInputField(label = strings.ZT_ACCESS_SECRET, value = config.accessSecret, onValueChange = { onUpdateConfig(config.copy(accessSecret = it)) }, placeholder = "Required for Service Tokens", testTag = "zt_access_secret"); IosInputField(label = strings.ZT_ACCESS_TOKEN, value = config.accessToken, onValueChange = { onUpdateConfig(config.copy(accessToken = it, ztTokenExpiry = config.parseJwtExpiry(it))) }, placeholder = "Existing token you already hold", testTag = "zt_access_token") } }
+    } }
+    if (ztError != null) {
+        Text(
+            text = ztError,
+            color = AppPalette.statusError,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 4.dp)
+        )
+    }
+}
+
 @Composable private fun NetworkPage(config: AetherConfig, onUpdateConfig: (AetherConfig) -> Unit, onShowToast: (String, Boolean) -> Unit = { _, _ -> }, onOpenDnsOptimizer: () -> Unit = {}) {
     val strings = LocalAppStrings.current
+    val httpLocked = config.isPsiphonActive() || config.isTorActive()
+    val httpLockToast = if (config.isTorActive()) strings.TOAST_DISABLE_TOR_FIRST else strings.TOAST_DISABLE_PSIPHON_FIRST
+    val httpLockSub = if (config.isTorActive()) strings.INTERNAL_HTTP_PROXY_LOCKED_BY_TOR else strings.INTERNAL_HTTP_PROXY_LOCKED_BY_PSIPHON
     IosGroupCard { Column {
         Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) { IosIconBadge(icon = Icons.Default.Language, backgroundColor = IosActiveBlue); Spacer(modifier = Modifier.width(12.dp)); IosInputField(label = strings.SOCKS5_HOST, value = config.socksHost, onValueChange = { onUpdateConfig(config.copy(socksHost = it)) }, modifier = Modifier.weight(1f), placeholder = "127.0.0.1", testTag = "socks_host_input"); Spacer(modifier = Modifier.width(10.dp)); IosInputField(label = strings.SOCKS_PORT, value = config.socksPort, onValueChange = { onUpdateConfig(config.copy(socksPort = it)) }, modifier = Modifier.width(75.dp), placeholder = "1819", keyboardType = KeyboardType.Number, testTag = "socks_port_input"); Spacer(modifier = Modifier.width(8.dp)); IosInputField(label = strings.HTTP_PORT, value = config.httpPort, onValueChange = { onUpdateConfig(config.copy(httpPort = it)) }, modifier = Modifier.width(75.dp), placeholder = "1820", keyboardType = KeyboardType.Number, testTag = "http_port_input") }
-        AppDivider(); IosSwitchRow(icon = Icons.Default.Http, iconBg = IosActiveBlue, title = strings.INTERNAL_HTTP_PROXY, subtitle = strings.INTERNAL_HTTP_PROXY_SUB, checked = config.httpProxyEnabled, onCheckedChange = { onUpdateConfig(config.copy(httpProxyEnabled = it)) }, testTag = "switch_http_proxy_enabled"); AppDivider()
+        AppDivider(); androidx.compose.foundation.layout.Box(modifier = if (httpLocked) Modifier.fillMaxWidth().clickable { onShowToast(httpLockToast, true) } else Modifier.fillMaxWidth()) { IosSwitchRow(icon = Icons.Default.Http, iconBg = IosActiveBlue, title = strings.INTERNAL_HTTP_PROXY, subtitle = if (httpLocked) httpLockSub else strings.INTERNAL_HTTP_PROXY_SUB, checked = config.httpProxyEnabled, enabled = !httpLocked, onCheckedChange = { if (httpLocked && !it) { onShowToast(httpLockToast, true); return@IosSwitchRow }; onUpdateConfig(config.copy(httpProxyEnabled = it)) }, testTag = "switch_http_proxy_enabled") }; AppDivider()
         IosInputFieldRow(icon = Icons.Default.Code, iconBg = IosSecondaryLabel, label = strings.TLS_KEY_GROUPS, value = config.tlsGroups, onValueChange = { onUpdateConfig(config.copy(tlsGroups = it)) }, placeholder = "P-256:X25519:P-384",         testTag = "tls_groups_input"); AppDivider()
         IosSwitchRow(icon = Icons.Default.Dns, iconBg = IosActiveBlue, title = strings.CUSTOM_DNS, subtitle = strings.CUSTOM_DNS_SUB, checked = config.dnsEnabled, onCheckedChange = { onUpdateConfig(config.copy(dnsEnabled = it, dnsList = if (it) config.dnsList.ifBlank { "1.1.1.1,1.0.0.1" } else config.dnsList)) }, testTag = "switch_custom_dns"); AppDivider()
         if (config.dnsEnabled) { Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.Bottom) { Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) { IosIconBadge(icon = Icons.Default.Dns, backgroundColor = IosActiveBlue); Spacer(modifier = Modifier.width(12.dp)); IosInputField(label = if (isDesktop) strings.TUNNEL_DNS_DESKTOP else strings.TUNNEL_DNS, value = config.dnsList, onValueChange = { onUpdateConfig(config.copy(dnsList = it.replace(Regex("\\s*,\\s*"), ","))) }, modifier = Modifier.weight(1f), placeholder = "1.1.1.1,1.0.0.1", testTag = "dns_list_input") }; Spacer(modifier = Modifier.width(8.dp)); Button(onClick = onOpenDnsOptimizer, modifier = Modifier.height(46.dp), shape = RoundedCornerShape(10.dp), colors = ButtonDefaults.buttonColors(containerColor = IosActiveBlue.copy(alpha = 0.15f), contentColor = IosActiveBlue), contentPadding = PaddingValues(horizontal = 16.dp)) { Text(strings.DNS_OPTIMIZE, fontSize = 13.sp, fontWeight = FontWeight.Bold) } }; AppDivider() }
@@ -461,14 +517,24 @@ private fun SettingsSubPage(page: SettingsPage, config: AetherConfig, isBatteryO
             }
             AppDivider()
         }
-        IosInputFieldRow(icon = Icons.AutoMirrored.Filled.AltRoute, iconBg = AppPalette.accentVariant, label = strings.WIW_OUTER, value = config.wiwOuter, onValueChange = { onUpdateConfig(config.copy(wiwOuter = it)) }, placeholder = "e.g. 162.159.192.1:2408", testTag = "wiw_outer_input"); AppDivider()
-        IosInputFieldRow(icon = Icons.AutoMirrored.Filled.AltRoute, iconBg = AppPalette.accentVariant, label = strings.WIW_INNER, value = config.wiwInner, onValueChange = { onUpdateConfig(config.copy(wiwInner = it)) }, placeholder = "e.g. 188.114.96.1:2408", testTag = "wiw_inner_input"); AppDivider()
-        IosSwitchRow(icon = Icons.Default.Radar, iconBg = AppPalette.statusScanning, title = strings.WIW_SCAN, subtitle = strings.WIW_SCAN_SUB, checked = config.wiwScan, onCheckedChange = { onUpdateConfig(config.copy(wiwScan = it)) }, testTag = "switch_wiw_scan"); AppDivider()
-        IosSwitchRow(icon = Icons.Default.Bolt, iconBg = AppPalette.statusScanning, title = strings.KEEPALIVE_PACKETS, subtitle = if (config.keepaliveEnabled) strings.KEEPALIVE_ON_SUB else strings.KEEPALIVE_OFF_SUB, checked = config.keepaliveEnabled, onCheckedChange = { onUpdateConfig(config.copy(keepaliveEnabled = it)) }, testTag = "switch_keepalive_enabled"); AppDivider()
-        AnimatedVisibility(visible = config.keepaliveEnabled, enter = fadeIn() + expandVertically(), exit = fadeOut() + shrinkVertically()) { Column { IosInputFieldRow(icon = Icons.Default.Bolt, iconBg = AppPalette.statusScanning, label = strings.KEEPALIVE_INTERVAL, value = config.keepalive.toString(), onValueChange = { onUpdateConfig(config.copy(keepalive = it.toIntOrNull()?.coerceIn(1, 300) ?: 5)) }, placeholder = "5", keyboardType = KeyboardType.Number, testTag = "keepalive_input"); AppDivider() } }
+        IosInputFieldRow(icon = Icons.AutoMirrored.Filled.AltRoute, iconBg = AppPalette.accentVariant, label = strings.FORCED_PEER_IP, value = config.peer, onValueChange = { onUpdateConfig(config.copy(peer = it)) }, placeholder = "e.g. 1.2.3.4:443", testTag = "peer_input"); AppDivider()
+        if (config.protocol == AetherProtocol.WG || config.protocol == AetherProtocol.GOOL) {
+            IosInputFieldRow(icon = Icons.AutoMirrored.Filled.AltRoute, iconBg = AppPalette.accentVariant, label = strings.WG_PEER, value = config.wgPeer, onValueChange = { onUpdateConfig(config.copy(wgPeer = it)) }, placeholder = "e.g. 162.159.192.1:2408", testTag = "wg_peer_input"); AppDivider()
+        }
+        if (config.protocol == AetherProtocol.GOOL) {
+            IosInputFieldRow(icon = Icons.AutoMirrored.Filled.AltRoute, iconBg = AppPalette.accentVariant, label = strings.WIW_OUTER, value = config.wiwOuter, onValueChange = { onUpdateConfig(config.copy(wiwOuter = it)) }, placeholder = "e.g. 162.159.192.1:2408", testTag = "wiw_outer_input"); AppDivider()
+            IosInputFieldRow(icon = Icons.AutoMirrored.Filled.AltRoute, iconBg = AppPalette.accentVariant, label = strings.WIW_INNER, value = config.wiwInner, onValueChange = { onUpdateConfig(config.copy(wiwInner = it)) }, placeholder = "e.g. 188.114.96.1:2408", testTag = "wiw_inner_input"); AppDivider()
+            IosSwitchRow(icon = Icons.Default.Radar, iconBg = AppPalette.statusScanning, title = strings.WIW_SCAN, subtitle = strings.WIW_SCAN_SUB, checked = config.wiwScan, onCheckedChange = { onUpdateConfig(config.copy(wiwScan = it)) }, testTag = "switch_wiw_scan"); AppDivider()
+        }
+        if (config.protocol == AetherProtocol.WG || config.protocol == AetherProtocol.GOOL) {
+            IosSwitchRow(icon = Icons.Default.Bolt, iconBg = AppPalette.statusScanning, title = strings.KEEPALIVE_PACKETS, subtitle = if (config.keepaliveEnabled) strings.KEEPALIVE_ON_SUB else strings.KEEPALIVE_OFF_SUB, checked = config.keepaliveEnabled, onCheckedChange = { onUpdateConfig(config.copy(keepaliveEnabled = it)) }, testTag = "switch_keepalive_enabled"); AppDivider()
+            AnimatedVisibility(visible = config.keepaliveEnabled, enter = fadeIn() + expandVertically(), exit = fadeOut() + shrinkVertically()) { Column { IosInputFieldRow(icon = Icons.Default.Bolt, iconBg = AppPalette.statusScanning, label = strings.KEEPALIVE_INTERVAL, value = config.keepalive.toString(), onValueChange = { onUpdateConfig(config.copy(keepalive = it.toIntOrNull()?.coerceIn(1, 300) ?: 5)) }, placeholder = "5", keyboardType = KeyboardType.Number, testTag = "keepalive_input"); AppDivider() } }
+        }
         IosInputFieldRow(icon = Icons.Default.Timer, iconBg = IosSecondaryLabel, label = strings.VALIDATION_INTERVAL, value = config.validateSecs.toString(), onValueChange = { onUpdateConfig(config.copy(validateSecs = it.toIntOrNull()?.coerceIn(1, 300) ?: 10)) }, placeholder = "10", keyboardType = KeyboardType.Number, testTag = "validate_secs_input"); AppDivider()
         IosInputFieldRow(icon = Icons.Default.Timer, iconBg = IosSecondaryLabel, label = "Reconnect Interval", value = config.reconnectSecs.toString(), onValueChange = { onUpdateConfig(config.copy(reconnectSecs = it.toIntOrNull()?.coerceIn(1, 300) ?: 2)) }, placeholder = "2", keyboardType = KeyboardType.Number, testTag = "reconnect_secs_input"); AppDivider()
-        IosInputFieldRow(icon = Icons.Default.Timer, iconBg = IosSecondaryLabel, label = "Endpoint Cooldown", value = config.wgEndpointCooldownSecs.toString(), onValueChange = { onUpdateConfig(config.copy(wgEndpointCooldownSecs = it.toIntOrNull()?.coerceIn(30, 3600) ?: 300)) }, placeholder = "300", keyboardType = KeyboardType.Number, testTag = "wg_cooldown_input"); AppDivider()
+        if (config.protocol == AetherProtocol.WG || config.protocol == AetherProtocol.GOOL) {
+            IosInputFieldRow(icon = Icons.Default.Timer, iconBg = IosSecondaryLabel, label = "Endpoint Cooldown", value = config.wgEndpointCooldownSecs.toString(), onValueChange = { onUpdateConfig(config.copy(wgEndpointCooldownSecs = it.toIntOrNull()?.coerceIn(30, 3600) ?: 300)) }, placeholder = "300", keyboardType = KeyboardType.Number, testTag = "wg_cooldown_input"); AppDivider()
+        }
         IosInputFieldRow(icon = Icons.Default.Memory, iconBg = IosSecondaryLabel, label = strings.NETSTACK_TCP_RX, value = if (config.netstackTcpRx > 0) config.netstackTcpRx.toString() else "", onValueChange = { onUpdateConfig(config.copy(netstackTcpRx = it.toIntOrNull()?.coerceIn(0, 67108864) ?: 0)) }, placeholder = "Auto (bytes)", keyboardType = KeyboardType.Number, testTag = "netstack_rx_input"); AppDivider()
         IosInputFieldRow(icon = Icons.Default.Memory, iconBg = IosSecondaryLabel, label = strings.NETSTACK_TCP_TX, value = if (config.netstackTcpTx > 0) config.netstackTcpTx.toString() else "", onValueChange = { onUpdateConfig(config.copy(netstackTcpTx = it.toIntOrNull()?.coerceIn(0, 67108864) ?: 0)) }, placeholder = "Auto (bytes)", keyboardType = KeyboardType.Number, testTag = "netstack_tx_input"); AppDivider()
         IosSwitchRow(icon = Icons.Default.Block, iconBg = AppPalette.statusError, title = "No Profile Retry", subtitle = "Disable retry with next profile on failure", checked = config.noProfileRetry, onCheckedChange = { onUpdateConfig(config.copy(noProfileRetry = it)) }, testTag = "switch_no_profile_retry")
@@ -520,6 +586,7 @@ private fun encodeUpstreamCredential(s: String): String = s.replace("@", "%40").
     val strings = LocalAppStrings.current
     IosGroupCard { Column {
         IosInputFieldRow(icon = Icons.Default.Speed, iconBg = AppPalette.statusScanning, label = strings.PING_URL_LABEL, value = config.pingUrl, onValueChange = { onUpdateConfig(config.copy(pingUrl = it)) }, placeholder = "https://www.gstatic.com/generate_204", testTag = "ping_url_input"); AppDivider()
+        IosPickerRow(icon = Icons.Default.Public, iconBg = IosActiveBlue, title = strings.IP_INFO_PROVIDER_LABEL, value = config.ipInfoProvider.displayName, options = IpInfoProvider.entries.map { it.displayName }, onOptionSelected = { onUpdateConfig(config.copy(ipInfoProvider = IpInfoProvider.entries[it])) }); AppDivider()
         val logLevelOptions = AetherLogLevel.entries.map { it.displayName }
         val logLevelLocalized = mapOf("off" to strings.LOG_LEVEL_OFF, "error" to strings.LOG_LEVEL_ERROR, "warn" to strings.LOG_LEVEL_WARN, "info" to strings.LOG_LEVEL_INFO, "debug" to strings.LOG_LEVEL_DEBUG)
         IosPickerRow(icon = Icons.Default.BugReport, iconBg = AppPalette.debugCyan, title = strings.APP_SYSTEM_LOGGING, value = logLevelLocalized[config.appLogLevel.rawValue] ?: config.appLogLevel.displayName.substringBefore(" ("), options = logLevelLocalized.values.toList(), onOptionSelected = { idx -> val key = logLevelLocalized.keys.toList()[idx]; val level = AetherLogLevel.entries.find { it.rawValue == key } ?: AetherLogLevel.INFO; onUpdateConfig(config.copy(appLogLevel = level)) }); AppDivider()
@@ -606,6 +673,17 @@ private fun encodeUpstreamCredential(s: String): String = s.replace("@", "%40").
     }
 }
 
+@Composable private fun SystemPage(isAndroid: Boolean, onExportBackup: () -> Unit, onImportBackup: () -> Unit, onOpenVpnSettings: () -> Unit, onResetClick: () -> Unit) {
+    IosGroupCard { Column {
+        val strings = LocalAppStrings.current
+        if (isAndroid) {
+            IosActionRow(icon = Icons.Default.Lock, iconBg = Color(0xFF0A84FF), title = strings.ALWAYS_ON_VPN, subtitle = strings.ALWAYS_ON_VPN_SUB, onClick = onOpenVpnSettings); AppDivider()
+        }
+        IosActionRow(icon = Icons.Default.CloudUpload, iconBg = AppPalette.accentVariant, title = strings.FULL_BACKUP_TITLE, subtitle = strings.FULL_BACKUP_SUB, onClick = onExportBackup); AppDivider()
+        IosActionRow(icon = Icons.Default.CloudDownload, iconBg = IosActiveGreen, title = strings.RESTORE_BACKUP_TITLE, subtitle = strings.RESTORE_BACKUP_SUB, onClick = onImportBackup); AppDivider()
+        IosActionRow(icon = Icons.Default.DeleteForever, iconBg = AppPalette.statusError, title = strings.RESET_DEFAULTS, subtitle = strings.RESET_DEFAULTS_SUB, onClick = onResetClick, titleColor = AppPalette.statusError)
+    } }
+}
 @Composable private fun AutoConnectPage(isAndroid: Boolean, loadAutoConnectSettings: () -> AutoConnectSettings, saveAutoConnectSettings: (AutoConnectSettings) -> Unit) {
     val strings = LocalAppStrings.current
     var settings by remember { mutableStateOf(loadAutoConnectSettings()) }
@@ -703,14 +781,3 @@ private fun encodeUpstreamCredential(s: String): String = s.replace("@", "%40").
     }
 }
 
-@Composable private fun SystemPage(isAndroid: Boolean, onExportBackup: () -> Unit, onImportBackup: () -> Unit, onOpenVpnSettings: () -> Unit, onResetClick: () -> Unit) {
-    IosGroupCard { Column {
-        val strings = LocalAppStrings.current
-        if (isAndroid) {
-            IosActionRow(icon = Icons.Default.Lock, iconBg = Color(0xFF0A84FF), title = strings.ALWAYS_ON_VPN, subtitle = strings.ALWAYS_ON_VPN_SUB, onClick = onOpenVpnSettings); AppDivider()
-        }
-        IosActionRow(icon = Icons.Default.CloudUpload, iconBg = AppPalette.accentVariant, title = strings.FULL_BACKUP_TITLE, subtitle = strings.FULL_BACKUP_SUB, onClick = onExportBackup); AppDivider()
-        IosActionRow(icon = Icons.Default.CloudDownload, iconBg = IosActiveGreen, title = strings.RESTORE_BACKUP_TITLE, subtitle = strings.RESTORE_BACKUP_SUB, onClick = onImportBackup); AppDivider()
-        IosActionRow(icon = Icons.Default.DeleteForever, iconBg = AppPalette.statusError, title = strings.RESET_DEFAULTS, subtitle = strings.RESET_DEFAULTS_SUB, onClick = onResetClick, titleColor = AppPalette.statusError)
-    } }
-}

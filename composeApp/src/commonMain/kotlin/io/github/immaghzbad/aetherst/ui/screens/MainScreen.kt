@@ -88,14 +88,12 @@ import io.github.immaghzbad.aetherst.platform.isDesktop
 import io.github.immaghzbad.aetherst.platform.getSystemUtils
 import io.github.immaghzbad.aetherst.platform.getDeviceModel
 import io.github.immaghzbad.aetherst.platform.getOsVersion
-import io.github.immaghzbad.aetherst.platform.getSettings
 import io.github.immaghzbad.aetherst.shared.desktop.TrayState
 import io.github.immaghzbad.aetherst.shared.ui.AetherViewModel
 import io.github.immaghzbad.aetherst.shared.ui.OnboardingViewModel
 import io.github.immaghzbad.aetherst.shared.ui.components.IosToast
 import io.github.immaghzbad.aetherst.shared.ui.components.PlatformBackHandler
 import io.github.immaghzbad.aetherst.shared.model.AetherProtocol
-import io.github.immaghzbad.aetherst.shared.model.AutoConnectSettings
 import kotlin.math.roundToInt
 
 private val IosNavBackground = AppPalette.surfaceRaised
@@ -199,6 +197,7 @@ fun MainScreen(viewModel: AetherViewModel, onboardingViewModel: OnboardingViewMo
 @Composable
 private fun DashboardContent(viewModel: AetherViewModel, scaleFactor: Float, platformContext: PlatformContext) {
     var showTrayAdminDialog by remember { mutableStateOf(false) }
+    var zeroTrustOpen by remember { mutableStateOf(false) }
     var isSwipeDragging by remember { mutableStateOf(false) }
 
     val config by viewModel.config.collectAsStateWithLifecycle()
@@ -212,6 +211,8 @@ private fun DashboardContent(viewModel: AetherViewModel, scaleFactor: Float, pla
     val importConflictRules by viewModel.importConflictRules.collectAsStateWithLifecycle()
     val importErrorMessage by viewModel.importErrorMessage.collectAsStateWithLifecycle()
     val isOptimizingMtu by viewModel.isOptimizingMtu.collectAsStateWithLifecycle()
+    val isWaitingForLoginCode by viewModel.isWaitingForLoginCode.collectAsStateWithLifecycle()
+    val scrollToZeroTrust by viewModel.scrollToZeroTrust.collectAsStateWithLifecycle()
 
     val scope = rememberCoroutineScope()
     val navController = rememberNavController()
@@ -235,6 +236,20 @@ private fun DashboardContent(viewModel: AetherViewModel, scaleFactor: Float, pla
             showTrayAdminDialog = true
         }
     }
+    LaunchedEffect(scrollToZeroTrust) {
+        if (scrollToZeroTrust) {
+            zeroTrustOpen = true
+            if (currentSubRoute != Screen.None.route) navController.popBackStack()
+            scope.launch { pagerState.animateScrollToPage(Screen.Settings.tabIndex!!) }
+        }
+    }
+    LaunchedEffect(pagerState.currentPage) {
+        if (pagerState.currentPage != Screen.Settings.tabIndex) {
+            zeroTrustOpen = false
+            if (scrollToZeroTrust) viewModel.onZeroTrustScrolled()
+        }
+    }
+
     fun selectTab(index: Int) {
         scope.launch { pagerState.animateScrollToPage(index.coerceIn(0, topLevelRoutes.lastIndex)) }
     }
@@ -346,11 +361,24 @@ private fun DashboardContent(viewModel: AetherViewModel, scaleFactor: Float, pla
                         onForceStop = { viewModel.forceStop() },
                         onUpdateConfig = { viewModel.updateConfig(it) },
                         onUpdateProtocol = { proto ->
-                            viewModel.updateConfig(config.copy(protocol = AetherProtocol.GOOL))
+                            if (proto == AetherProtocol.ZERO_TRUST) {
+                                viewModel.updateConfig(config.copy(protocol = proto, psiphonEnabled = false, torEnabled = false))
+                            } else if (config.isPsiphonActive()) {
+                                val outer = when (proto) { AetherProtocol.WG -> "wg" ; AetherProtocol.GOOL -> "gool" ; else -> "masque" }
+                                viewModel.updateConfig(config.copy(protocol = proto, psiphonChainOuter = outer))
+                            } else {
+                                viewModel.updateConfig(config.copy(protocol = proto))
+                            }
                         },
+                        onTogglePsiphon = { enabled -> viewModel.updateConfig(config.copy(psiphonEnabled = enabled, chainProvider = io.github.immaghzbad.aetherst.shared.model.ChainProvider.PSIPHON)) },
+                        onToggleTor = { enabled -> viewModel.updateConfig(config.copy(torEnabled = enabled, chainProvider = io.github.immaghzbad.aetherst.shared.model.ChainProvider.TOR)) },
                         onRefreshIpInfo = { viewModel.refreshIpInfo() },
                         onRefreshPing = { viewModel.refreshPing() },
                         onCopy = { viewModel.copyToClipboard(it) },
+                        onOpenSettingsToZeroTrust = {
+                            zeroTrustOpen = true
+                            selectTab(Screen.Settings.tabIndex!!)
+                        },
                         appVersion = viewModel.appVersion,
                         bottomContentPadding = totalNavBarHeight,
                         platformContext = platformContext,
@@ -375,25 +403,9 @@ private fun DashboardContent(viewModel: AetherViewModel, scaleFactor: Float, pla
                         onRequestBatteryOptimization = { viewModel.requestBatteryOptimization() },
                         onOpenVpnSettings = { viewModel.openVpnSettings() },
                         onShowToast = { msg: String, err: Boolean -> viewModel.showToast(msg, err) },
-                        bottomContentPadding = totalNavBarHeight,
-                        loadAutoConnectSettings = {
-                            val s = getSettings(platformContext)
-                            io.github.immaghzbad.aetherst.shared.model.AutoConnectSettings(
-                                autoConnectOnStart = s.getBoolean(io.github.immaghzbad.aetherst.shared.model.AutoConnectSettings.PREF_AUTO_CONNECT_ON_START, false),
-                                autoConnectOnBoot = s.getBoolean(io.github.immaghzbad.aetherst.shared.model.AutoConnectSettings.PREF_AUTO_CONNECT_ON_BOOT, false),
-                                autoConnectOnNetwork = s.getBoolean(io.github.immaghzbad.aetherst.shared.model.AutoConnectSettings.PREF_AUTO_CONNECT_ON_NETWORK, false),
-                                autoRestartOnCrash = s.getBoolean(io.github.immaghzbad.aetherst.shared.model.AutoConnectSettings.PREF_AUTO_RESTART_ON_CRASH, false),
-                                autoConnectAfterCrash = s.getBoolean(io.github.immaghzbad.aetherst.shared.model.AutoConnectSettings.PREF_AUTO_CONNECT_AFTER_CRASH, false)
-                            )
-                        },
-                        saveAutoConnectSettings = { acs ->
-                            val s = getSettings(platformContext)
-                            s.putBoolean(io.github.immaghzbad.aetherst.shared.model.AutoConnectSettings.PREF_AUTO_CONNECT_ON_START, acs.autoConnectOnStart)
-                            s.putBoolean(io.github.immaghzbad.aetherst.shared.model.AutoConnectSettings.PREF_AUTO_CONNECT_ON_BOOT, acs.autoConnectOnBoot)
-                            s.putBoolean(io.github.immaghzbad.aetherst.shared.model.AutoConnectSettings.PREF_AUTO_CONNECT_ON_NETWORK, acs.autoConnectOnNetwork)
-                            s.putBoolean(io.github.immaghzbad.aetherst.shared.model.AutoConnectSettings.PREF_AUTO_RESTART_ON_CRASH, acs.autoRestartOnCrash)
-                            s.putBoolean(io.github.immaghzbad.aetherst.shared.model.AutoConnectSettings.PREF_AUTO_CONNECT_AFTER_CRASH, acs.autoConnectAfterCrash)
-                        }
+                        initialPage = if (zeroTrustOpen) SettingsPage.ZEROTRUST else null,
+                        onSubPageClosed = { zeroTrustOpen = false },
+                        bottomContentPadding = totalNavBarHeight
                     )
                     Screen.Logs -> LogsScreen(
                         viewModel = viewModel,
@@ -416,6 +428,13 @@ private fun DashboardContent(viewModel: AetherViewModel, scaleFactor: Float, pla
                 modifier = Modifier.align(Alignment.BottomCenter)
             )
         }
+        if (isWaitingForLoginCode) {
+            ZeroTrustLoginDialog(
+                onSubmit = { viewModel.submitLoginCode(it) },
+                onDismiss = { viewModel.submitLoginCode("") },
+                scaleFactor = scaleFactor
+            )
+        }
         if (showTrayAdminDialog) {
             AdminRequiredDialog(
                 onRelaunch = {
@@ -425,6 +444,143 @@ private fun DashboardContent(viewModel: AetherViewModel, scaleFactor: Float, pla
                 onDismiss = { showTrayAdminDialog = false },
                 scaleFactor = scaleFactor
             )
+        }
+    }
+}
+
+@Composable
+fun ZeroTrustLoginDialog(
+    onSubmit: (String) -> Unit,
+    onDismiss: () -> Unit,
+    scaleFactor: Float
+) {
+    var code by remember { mutableStateOf("") }
+    val focusManager = LocalFocusManager.current
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.6f))
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ) { focusManager.clearFocus() },
+            contentAlignment = Alignment.Center
+        ) {
+            Column(
+                modifier = Modifier
+                    .width((320 * scaleFactor).dp)
+                    .clip(RoundedCornerShape(28.dp))
+                    .background(IosNavBackground)
+                    .padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(56.dp)
+                        .clip(CircleShape)
+                        .background(IosNavActiveBlue.copy(alpha = 0.1f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Lock,
+                        contentDescription = null,
+                        tint = IosNavActiveBlue,
+                        modifier = Modifier.size(28.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(20.dp))
+
+                Text(
+                    text = "Zero Trust Login",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = Color.White,
+                    fontSize = (20 * scaleFactor).sp
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Text(
+                    text = "A one-time code was sent to your email. Please enter it below to authorize this device.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = IosNavInactiveGrey,
+                    textAlign = TextAlign.Center,
+                    fontSize = (13 * scaleFactor).sp,
+                    lineHeight = 18.sp
+                )
+
+                Spacer(modifier = Modifier.height(24.dp))
+
+                BasicTextField(
+                    value = code,
+                    onValueChange = { if (it.length <= 6) code = it },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(56.dp)
+                        .background(Color.Black.copy(alpha = 0.3f), RoundedCornerShape(14.dp))
+                        .border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(14.dp)),
+                    textStyle = MaterialTheme.typography.headlineMedium.copy(
+                        color = IosNavActiveBlue,
+                        textAlign = TextAlign.Center,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 8.sp
+                    ),
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.NumberPassword,
+                        imeAction = ImeAction.Done
+                    ),
+                    keyboardActions = KeyboardActions(onDone = {
+                        if (code.length == 6) onSubmit(code)
+                    }),
+                    cursorBrush = SolidColor(IosNavActiveBlue),
+                    decorationBox = { innerTextField ->
+                        Box(contentAlignment = Alignment.Center) {
+                            if (code.isEmpty()) {
+                                Text(
+                                    "000000",
+                                    color = Color.White.copy(alpha = 0.05f),
+                                    style = MaterialTheme.typography.headlineMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 8.sp
+                                )
+                            }
+                            innerTextField()
+                        }
+                    }
+                )
+
+                Spacer(modifier = Modifier.height(32.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    TextButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.weight(1f).height(50.dp),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Text("Cancel", color = IosNavInactiveGrey, fontWeight = FontWeight.Medium)
+                    }
+                    Button(
+                        onClick = { if (code.length == 6) onSubmit(code) },
+                        enabled = code.length == 6,
+                        modifier = Modifier.weight(1f).height(50.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = IosNavActiveBlue
+                        ),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Text("Verify", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
         }
     }
 }

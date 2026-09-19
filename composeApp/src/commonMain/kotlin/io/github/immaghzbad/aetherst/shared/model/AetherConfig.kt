@@ -1,6 +1,7 @@
 package io.github.immaghzbad.aetherst.shared.model
 
 import io.github.immaghzbad.aetherst.platform.isWindows
+import io.github.immaghzbad.aetherst.shared.i18n.AppStrings
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 import kotlinx.serialization.Serializable
@@ -8,7 +9,10 @@ import java.util.Locale
 
 @Serializable
 enum class AetherProtocol(val rawValue: String, val displayName: String, val description: String) {
-    GOOL("gool", "Gool (WG-in-WG)", "Double encryption WireGuard-in-WireGuard")
+    MASQUE("masque", "MASQUE", "HTTP/2/3 Tunneling (MASQUE)"),
+    WG("wg", "WireGuard", "Lean speed WireGuard tunnel"),
+    GOOL("gool", "Gool (WG-in-WG)", "Double encryption WireGuard-in-WireGuard"),
+    ZERO_TRUST("zt", "Zero Trust", "Cloudflare for Organizations")
 }
 
 @Serializable
@@ -62,6 +66,42 @@ enum class TunnelEngine(val displayName: String) {
 }
 
 @Serializable
+enum class PsiphonChainMode(val rawValue: String, val displayName: String) {
+    AUTO("auto", "Auto"),
+    ALWAYS("always", "Always"),
+    FALLBACK("fallback", "Fallback")
+}
+
+@Serializable
+enum class ChainProvider(val rawValue: String, val displayName: String) {
+    PSIPHON("psiphon", "Psiphon"),
+    TOR("tor", "Tor")
+}
+
+@Serializable
+enum class TorMode(val rawValue: String, val displayName: String) {
+    TOR("chain", "Tor inside tunnel"),
+    TOR_REVERSE("reverse", "Tunnel through Tor"),
+    TOR_ONLY("only", "Tor only")
+}
+
+@Serializable
+enum class IpInfoProvider(val rawValue: String, val displayName: String) {
+    AUTO("auto", "Auto"),
+    IPSB("ipsb", "ip.sb"),
+    IPWHOIS("ipwhois", "ipwho.is"),
+    FREEIPAPI("freeipapi", "freeipapi.com"),
+    FREE_FREEIPAPI("free_freeipapi", "free.freeipapi.com"),
+    GEOJS("geojs", "geojs.io"),
+    REALLYFREE("reallyfree", "reallyfreegeoip"),
+    GEOIPLOOKUP("geoiplookup", "geoiplookup.io"),
+    IPIFY("ipify", "ipify (IP only)"),
+    IFCONFIG("ifconfig", "ifconfig.me (IP only)"),
+    IPINFO("ipinfo", "ipinfo.io"),
+    AMAZON("amazon", "Amazon (IP only)")
+}
+
+@Serializable
 enum class ConnectionMode {
     TUNNEL,
     PROXY_ONLY,
@@ -106,12 +146,17 @@ data class RoutingRule(
 @Serializable
 data class AetherConfig(
     val presetId: String = "turbo",
-    val protocol: AetherProtocol = AetherProtocol.GOOL,
+    val protocol: AetherProtocol = AetherProtocol.MASQUE,
     val noise: AetherNoise = AetherNoise.GFW,
     val scanMode: AetherScanMode = AetherScanMode.TURBO,
     val ipMode: AetherIpMode = AetherIpMode.AUTO,
+    val echEnabled: Boolean = false,
     val httpProxyEnabled: Boolean = false,
     val perfProfile: AetherPerfProfile = AetherPerfProfile.AUTO,
+    val h2Mode: Boolean = true,
+    val h2Fragment: Boolean = false,
+    val fragmentSize: String = "16-32",
+    val fragmentDelay: String = "2-10",
     val noDataCheck: Boolean = false,
     val quickReconnect: Boolean = true,
     val socksHost: String = "127.0.0.1",
@@ -119,9 +164,12 @@ data class AetherConfig(
     val httpPort: String = "1820",
     val appLogLevel: AetherLogLevel = AetherLogLevel.INFO,
     val coreLogLevel: AetherLogLevel = AetherLogLevel.INFO,
+    val peer: String = "",
+    val wgPeer: String = "",
     val wiwOuter: String = "",
     val wiwInner: String = "",
     val wiwScan: Boolean = true,
+    val masqueMtu: Int = 0,
     val netstackTcpRx: Int = 0,
     val netstackTcpTx: Int = 0,
     val keepaliveEnabled: Boolean = true,
@@ -138,6 +186,14 @@ data class AetherConfig(
     val blockedPackages: Set<String> = emptySet(),
     val tunneledPackages: Set<String> = emptySet(),
     val routingRules: List<RoutingRule> = emptyList(),
+    val teamName: String = "",
+    val accessEmail: String = "",
+    val accessId: String = "",
+    val accessSecret: String = "",
+    val accessToken: String = "",
+    val ztStaySignedIn: Boolean = true,
+    val ztTokenExpiry: Long = 0,
+    val useGateway: Boolean = false,
     val killSwitch: Boolean = false,
     val ipv6Leak: Boolean = true,
     val smartReconnect: Boolean = true,
@@ -168,10 +224,86 @@ data class AetherConfig(
     val cloakFallbackPorts: String = "443,2053,2083,2087,2096,8443",
     val cloakLogLevel: String = "info",
     val cloakRandomizeSniCase: Boolean = false,
+    val psiphonEnabled: Boolean = false,
+    val psiphonChainOuter: String = "masque",
+    val psiphonSocksPort: String = "3080",
+    val psiphonEgressRegion: String = "",
+    val psiphonChainMode: PsiphonChainMode = PsiphonChainMode.AUTO,
+    val psiphonMasqueOrder: String = "auto",
+    val psiphonViaAether: Boolean = true,
+    val psiphonOnly: Boolean = false,
+    val chainProvider: ChainProvider = ChainProvider.PSIPHON,
+    val torEnabled: Boolean = false,
+    val torMode: TorMode = TorMode.TOR,
+    val torBindPort: String = "3081",
+    val torBridgesMode: String = "auto",
+    val torBridgeLines: String = "",
+    val torPtDir: String = "",
+    val torPtBinaries: String = "",
+    val torCountry: String = "",
+    val mimEnabled: Boolean = false,
+    val mimOuter: String = "",
+    val mimInner: String = "",
+    val mimScan: Boolean = true,
+    val quicV2Probe: Boolean = true,
+    val firewallMark: String = "",
+    val halfCloseSecs: Int = 0,
+    val tcpKeepaliveSecs: Int = 0,
+    val tcpConnectSecs: Int = 0,
+    val maxClients: Int = 0,
     val pingUrl: String = "https://www.gstatic.com/generate_204",
+    val ipInfoProvider: IpInfoProvider = IpInfoProvider.AUTO,
     val connectButtonStyle: String = "swipe",
     val appLanguage: String = "auto"
 ) {
+    fun zeroTrustError(): String? {
+        if (protocol != AetherProtocol.ZERO_TRUST) return null
+        if (teamName.isBlank()) return "Organization Team Name is required for Zero Trust"
+
+        val hasEmail = accessEmail.isNotBlank()
+        val hasServiceToken = accessId.isNotBlank() || accessSecret.isNotBlank()
+        val hasToken = accessToken.isNotBlank()
+
+        if (!hasEmail && !hasServiceToken && !hasToken) {
+            return "Provide one authentication method: Access Email, Service Token, or Access Token"
+        }
+        if (hasServiceToken && (accessId.isBlank() || accessSecret.isBlank())) {
+            return "Service Token requires both Access Client ID and Access Client Secret"
+        }
+        val providedCount = listOf(hasEmail, hasServiceToken, hasToken).count { it }
+        if (providedCount > 1) return "Use only one authentication method at a time"
+
+        return null
+    }
+
+    fun zeroTrustErrorLocalized(strings: AppStrings): String? {
+        if (protocol != AetherProtocol.ZERO_TRUST) return null
+        if (teamName.isBlank()) return strings.TOAST_ZT_TEAM_REQUIRED
+        val hasEmail = accessEmail.isNotBlank()
+        val hasServiceToken = accessId.isNotBlank() || accessSecret.isNotBlank()
+        val hasToken = accessToken.isNotBlank()
+        if (!hasEmail && !hasServiceToken && !hasToken) {
+            return strings.TOAST_ZT_PROVIDE_ONE_AUTH
+        }
+        if (hasServiceToken && (accessId.isBlank() || accessSecret.isBlank())) {
+            return strings.TOAST_ZT_SERVICE_TOKEN_REQUIRES
+        }
+        val providedCount = listOf(hasEmail, hasServiceToken, hasToken).count { it }
+        if (providedCount > 1) return strings.TOAST_ZT_ONLY_ONE_AUTH
+        return null
+    }
+
+    fun effectiveZeroTrustConfig(): AetherConfig {
+        if (protocol != AetherProtocol.ZERO_TRUST) return this
+        if (!ztStaySignedIn) {
+            return this.copy(accessToken = "", accessId = "", accessSecret = "")
+        }
+        if (accessToken.isNotBlank() && ztTokenExpiry != 0L && ztTokenExpiry < System.currentTimeMillis()) {
+            return this.copy(accessToken = "")
+        }
+        return this
+    }
+
     @OptIn(ExperimentalEncodingApi::class)
     fun parseJwtExpiry(token: String): Long {
         val parts = token.split(".")
@@ -197,4 +329,8 @@ data class AetherConfig(
     }
 
     fun effectiveIpMode(): AetherIpMode = if (ipMode == AetherIpMode.AUTO) AetherIpMode.DUAL else ipMode
+
+    fun isPsiphonActive(): Boolean = chainProvider == ChainProvider.PSIPHON && psiphonEnabled
+
+    fun isTorActive(): Boolean = chainProvider == ChainProvider.TOR && torEnabled
 }

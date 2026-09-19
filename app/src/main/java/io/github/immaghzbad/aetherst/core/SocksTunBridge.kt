@@ -26,12 +26,14 @@ import java.net.Socket
 import java.net.SocketTimeoutException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.LinkedBlockingQueue
-import java.util.concurrent.SynchronousQueue
-import java.util.concurrent.ThreadFactory
-import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 
 sealed interface FlowKey
 
@@ -86,47 +88,99 @@ class SocksTunBridge(
     private val blockedPackagesProvider: () -> Set<String>,
     private val routingEngine: RoutingEngine
 ) : TunBridgeControl {
-    data class Stats(val txBytes: Long = 0, val rxBytes: Long = 0)
+    data class Stats(val txBytes: Long = 0, val rxBytes: Long = 0, val txDropped: Long = 0, val rxDropped: Long = 0, val tcpActive: Int = 0, val udpActive: Int = 0, val rejected: Long = 0)
+
+    private enum class TcpState { SYN_RCVD, POLICY, CONNECTING, ESTABLISHED, CLOSING }
 
     private val isRunning = AtomicBoolean(false)
     private var readThread: Thread? = null
     private var writeThread: Thread? = null
-    private val sessionThreadCounter = AtomicLong(0)
     private companion object {
         private const val UDP_IDLE_SHORT = 60000L
         private const val UDP_IDLE_VOIP = 180000L
+        private const val TCP_IDLE_MS = 120000L
+        private const val MAX_PENDING_SESSIONS = 512
+        private const val MAX_TCP_SESSIONS = 2048
+        private const val TUN_QUEUE_CAP = 8192
+        private const val SNI_WAIT_MS = 250L
+        private const val CONNECT_WARMUP_MS = 1500
+        private const val CONNECT_READY_MS = 4000
+        private const val BLOCK_CACHE_TTL_MS = 300000L
         private fun isVoipPort(port: Int) = port in 3478..3480 || port >= 1024
     }
-    private val executor = ThreadPoolExecutor(
-        0, 64,
-        60L, TimeUnit.SECONDS,
-        SynchronousQueue(),
-        ThreadFactory { r ->
-            Thread(r, "Aether-Sock-${sessionThreadCounter.incrementAndGet()}").apply { isDaemon = true }
-        },
-        ThreadPoolExecutor.AbortPolicy()
-    )
+    private val bridgeScope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(64))
+    private val pendingSessions = AtomicLong(0)
     private val rejectedCount = AtomicLong(0)
-    private fun safeExecute(block: () -> Unit) {
-        try {
-            executor.execute(block)
-        } catch (e: java.util.concurrent.RejectedExecutionException) {
-            val c = rejectedCount.incrementAndGet()
-            if (c <= 5 || c % 50 == 0L) LogRepository.w("[TunBridge] Task rejected pool 64/64 queued 0 count=$c: ${e.message}")
-        }
-    }
-    private fun safeExecuteInline(block: () -> Unit) {
-        try {
-            executor.execute(block)
-        } catch (e: java.util.concurrent.RejectedExecutionException) {
-            val c = rejectedCount.incrementAndGet()
-            if (c <= 5 || c % 50 == 0L) LogRepository.w("[TunBridge] Task rejected pool 64/64 queued 0 count=$c inline fallback: ${e.message}")
-            if (isRunning.get()) {
-                try { block() } catch (_: Exception) {}
+    private val fastGateRst = AtomicLong(0)
+    private val fastGateDrop = AtomicLong(0)
+    private val blockRstCount = AtomicLong(0)
+    private val blockNxCount = AtomicLong(0)
+    private val tunDropCount = AtomicLong(0)
+    private val sessDropCount = AtomicLong(0)
+    private val tunnelFlowCount = AtomicLong(0)
+    private val directFlowCount = AtomicLong(0)
+    private val lastSummaryAt = AtomicLong(0)
+    private val blockCache = ConcurrentHashMap<String, Long>()
+    @Volatile
+    private var lastGateSeen: SocksReadiness? = null
+    private fun launchSession(key: FlowKey, isTcp: Boolean, onRst: () -> Unit, block: suspend () -> Unit) {
+        pendingSessions.incrementAndGet()
+        if (pendingSessions.get() > MAX_PENDING_SESSIONS) {
+            pendingSessions.decrementAndGet()
+            evictIdleSessions()
+            if (pendingSessions.get() >= MAX_PENDING_SESSIONS) {
+                val c = rejectedCount.incrementAndGet()
+                if (c <= 5 || c % 50 == 0L) LogRepository.w("[TunBridge] shed new flow tcp=${tcpSessions.size} udp=${udpSessions.size} count=$c")
+                if (isTcp) removeTcpKey(key) else removeUdpKey(key)
+                onRst()
+                return
             }
         }
+        try {
+            bridgeScope.launch {
+                try {
+                    block()
+                } catch (_: Exception) {
+                } finally {
+                    pendingSessions.decrementAndGet()
+                }
+            }
+        } catch (_: Exception) {
+            pendingSessions.decrementAndGet()
+            if (isTcp) removeTcpKey(key) else removeUdpKey(key)
+            onRst()
+            return
+        }
     }
-    private val tunOutputQueue = LinkedBlockingQueue<ByteArray>(32768)
+    private fun removeTcpKey(key: FlowKey) {
+        tcpSessions.remove(key)?.forceClose()
+        uidCache.remove(key)
+    }
+    private fun removeUdpKey(key: FlowKey) {
+        udpSessions.remove(key)?.forceClose()
+        uidCache.remove(key)
+    }
+    private fun evictIdleSessions() {
+        if (tcpSessions.size < MAX_TCP_SESSIONS && udpSessions.size < MAX_TCP_SESSIONS) return
+        val now = SystemClock.elapsedRealtime()
+        var evicted = 0
+        for ((k, s) in tcpSessions.entries) {
+            if (evicted >= 64) break
+            if (!s.isActiveFlow(now) && tcpSessions.remove(k, s)) {
+                s.forceClose()
+                evicted++
+            }
+        }
+        for ((k, s) in udpSessions.entries) {
+            if (evicted >= 128) break
+            if (!s.isActiveFlow(now) && udpSessions.remove(k, s)) {
+                s.forceClose()
+                evicted++
+            }
+        }
+        if (evicted > 0) LogRepository.i("[TunBridge] evict idle=$evicted tcp=${tcpSessions.size} udp=${udpSessions.size}")
+    }
+    private val tunOutputQueue = LinkedBlockingQueue<ByteArray>(TUN_QUEUE_CAP)
     private val tcpSessions = ConcurrentHashMap<FlowKey, TcpSession>()
     private val udpSessions = ConcurrentHashMap<FlowKey, UdpSession>()
     private val connectivityManager by lazy { vpnService.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager }
@@ -205,24 +259,25 @@ class SocksTunBridge(
 
     override fun stop() {
         if (!isRunning.getAndSet(false)) return
-        tcpSessions.values.forEach { it.close() }
+        bridgeScope.cancel()
+        tcpSessions.values.forEach { it.forceClose() }
         tcpSessions.clear()
-        udpSessions.values.forEach { it.close() }
+        udpSessions.values.forEach { it.forceClose() }
         udpSessions.clear()
         tunOutputQueue.clear()
-        executor.shutdownNow()
-        runCatching { executor.awaitTermination(5, TimeUnit.SECONDS) }
+        associatePool.reset()
         dnsResolver.shutdown()
         readThread?.interrupt()
         writeThread?.interrupt()
     }
 
-    override fun getStats(): Stats = Stats(txBytes.get(), rxBytes.get())
+    override fun getStats(): Stats = Stats(txBytes.get(), rxBytes.get(), tunDropCount.get(), sessDropCount.get(), tcpSessions.size, udpSessions.size, rejectedCount.get())
 
     override fun updateUpstream(host: String, port: Int) {
         socksHost = host
         socksPort = port
         runCatching { dnsResolver.updateUpstream(host, port) }
+        associatePool.onUpstreamChanged()
         LogRepository.i("[TunBridge] Upstream switched to $host:$port mtu=$mtu gate=${SocksGate.readiness.value} activeTcp=${tcpSessions.size} activeUdp=${udpSessions.size}")
     }
 
@@ -230,14 +285,144 @@ class SocksTunBridge(
         if (critical) {
             if (!tunOutputQueue.offer(data)) {
                 tunOutputQueue.poll()
-                tunOutputQueue.offer(data)
+                if (!tunOutputQueue.offer(data)) tunDropCount.incrementAndGet()
             }
         } else {
-            tunOutputQueue.offer(data)
+            if (!tunOutputQueue.offer(data)) tunDropCount.incrementAndGet()
         }
     }
+    private fun gateReady(): Boolean = SocksGate.readiness.value == SocksReadiness.PROBED_OK
+    private fun noteGate() {
+        val g = SocksGate.readiness.value
+        val prev = lastGateSeen
+        if (prev != g) {
+            lastGateSeen = g
+            LogRepository.i("[TunBridge] gate $prev -> $g tcp=${tcpSessions.size} udp=${udpSessions.size} rej=${rejectedCount.get()} drop=${tunDropCount.get()}")
+        }
+    }
+    private fun connectTimeoutMs(): Int = if (gateReady()) CONNECT_READY_MS else CONNECT_WARMUP_MS
+    private fun blockKey(ip: String, port: Int, domain: String?): String {
+        val n = domain?.trim()?.trimEnd('.')?.lowercase() ?: ""
+        return "$ip:$port:$n"
+    }
+    private fun isBlockCached(ip: String, port: Int, domain: String?): Boolean {
+        val n = domain?.trim()?.trimEnd('.')?.lowercase() ?: ""
+        if (n.isEmpty()) return false
+        val exp = blockCache[blockKey(ip, port, n)] ?: return false
+        if (SystemClock.elapsedRealtime() > exp) {
+            blockCache.remove(blockKey(ip, port, n))
+            return false
+        }
+        return true
+    }
+    private fun cacheBlock(ip: String, port: Int, domain: String?) {
+        val n = domain?.trim()?.trimEnd('.')?.lowercase() ?: ""
+        if (n.isEmpty()) return
+        blockCache[blockKey(ip, port, n)] = SystemClock.elapsedRealtime() + BLOCK_CACHE_TTL_MS
+        if (blockCache.size > 2048) {
+            val it = blockCache.entries.iterator()
+            if (it.hasNext()) {
+                it.next()
+                it.remove()
+            }
+        }
+    }
+    private fun fastClassify(ip: String, port: Int, domain: String?): RoutingMode {
+        if (isBlockCached(ip, port, domain)) return RoutingMode.BLOCK
+        val d = routingEngine.resolve(ip, port, domain, null, null)
+        if (d.mode == RoutingMode.BLOCK) cacheBlock(ip, port, d.resolvedDomain ?: domain)
+        return d.mode
+    }
+    private fun maybeSummary() {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastSummaryAt.get() < 30000) return
+        lastSummaryAt.set(now)
+        LogRepository.i("[TunBridge] sum gate=${SocksGate.readiness.value} tcp=${tcpSessions.size} udp=${udpSessions.size} pend=${pendingSessions.get()} rst=${blockRstCount.get()} gateRst=${fastGateRst.get()} gateDrop=${fastGateDrop.get()} nx=${blockNxCount.get()} tunDrop=${tunDropCount.get()} sessDrop=${sessDropCount.get()} rej=${rejectedCount.get()} tun=${tunnelFlowCount.get()} dir=${directFlowCount.get()} assocRe=${associatePool.reuseCount.get()} assocNew=${associatePool.establishCount.get()}")
+    }
 
+    private val associatePool = SharedAssociatePool()
+    private inner class SharedAssociatePool {
+        private val lock = Any()
+        private var ctrl: Socket? = null
+        private var relay: InetSocketAddress? = null
+        private var upstreamKey: String = ""
+        val reuseCount = AtomicLong(0)
+        val establishCount = AtomicLong(0)
+        @Volatile
+        var multiplexUnsupported: Boolean = false
+        fun relayFor(): InetSocketAddress? {
+            if (multiplexUnsupported) return null
+            synchronized(lock) {
+                val key = "$socksHost:$socksPort"
+                val c = ctrl
+                val r = relay
+                if (c != null && r != null && key == upstreamKey && !c.isClosed && c.isConnected) {
+                    reuseCount.incrementAndGet()
+                    return r
+                }
+                runCatching { ctrl?.close() }
+                ctrl = null
+                relay = null
+                val s = Socket()
+                if (!vpnService.protect(s)) {
+                    runCatching { s.close() }
+                    return null
+                }
+                s.tcpNoDelay = true
+                s.keepAlive = true
+                try {
+                    s.connect(InetSocketAddress(socksHost, socksPort), connectTimeoutMs())
+                } catch (_: Exception) {
+                    runCatching { s.close() }
+                    return null
+                }
+                val ins = s.getInputStream()
+                val out = s.getOutputStream()
+                if (!socksHandshake(ins, out)) {
+                    runCatching { s.close() }
+                    multiplexUnsupported = true
+                    LogRepository.w("[TunBridge] assoc shared handshake rejected, per-flow fallback")
+                    return null
+                }
+                out.write(socksRequest(3, null, ByteArray(4), 0))
+                out.flush()
+                val rep = readSocksReply(ins)
+                if (rep == null) {
+                    runCatching { s.close() }
+                    multiplexUnsupported = true
+                    LogRepository.w("[TunBridge] assoc shared reply rejected, per-flow fallback")
+                    return null
+                }
+                val host = if (rep.address.isAnyLocalAddress) runCatching { InetAddress.getByName(socksHost) }.getOrNull() ?: rep.address else rep.address
+                val addr = InetSocketAddress(host, rep.port)
+                ctrl = s
+                relay = addr
+                upstreamKey = key
+                establishCount.incrementAndGet()
+                if (establishCount.get() <= 3 || establishCount.get() % 25 == 0L) LogRepository.i("[TunBridge] assoc shared established relay=$addr via $key re=${reuseCount.get()}")
+                return addr
+            }
+        }
+        fun reset() {
+            synchronized(lock) {
+                runCatching { ctrl?.close() }
+                ctrl = null
+                relay = null
+                upstreamKey = ""
+            }
+        }
+        fun onUpstreamChanged() {
+            synchronized(lock) {
+                runCatching { ctrl?.close() }
+                ctrl = null
+                relay = null
+                upstreamKey = ""
+                multiplexUnsupported = false
+            }
+        }
+    }
     private fun processPacket(packet: ByteArray, len: Int) {
+        noteGate()
         if (len < 1) return
         when ((packet[0].toInt() and 0xF0) shr 4) {
             4 -> processIpv4(packet, len)
@@ -293,9 +478,13 @@ class SocksTunBridge(
                 val dstBytes = intToBytes(dstIp)
                 val local = InetSocketAddress(InetAddress.getByAddress(srcBytes), srcPort)
                 val remote = InetSocketAddress(InetAddress.getByAddress(dstBytes), dstPort)
-                val uid = ownerUid(OsConstants.IPPROTO_TCP, local, remote)
+                val uid = resolveOwnerUid(key, OsConstants.IPPROTO_TCP, local, remote)
 
-                if (uid == -1 && currentBlockedUids().isNotEmpty()) {
+                if (uid == -1) {
+                    if (currentBlockedUids().isNotEmpty()) {
+                        LogRepository.d("[TunBridge] UID unresolved for ${local.address.hostAddress}:$srcPort->${remote.address.hostAddress}:$dstPort proto=TCP; holding for retransmit")
+                        return
+                    }
                     LogRepository.w("Flow owner UID unresolved; permitting connection")
                 }
 
@@ -304,11 +493,30 @@ class SocksTunBridge(
                     enqueueTun(buildTcp4(dstIp, srcIp, dstPort, srcPort, null, 0, (seq + 1) and 0xFFFFFFFFL, 0x14), true)
                     return
                 }
-
+                val dstIpStr = InetAddress.getByAddress(dstBytes).hostAddress ?: ""
+                if (fastClassify(dstIpStr, dstPort, DnsMap.get(dstIpStr)) == RoutingMode.BLOCK) {
+                    val seq = getLong(packet, hLen + 4)
+                    enqueueTun(buildTcp4(dstIp, srcIp, dstPort, srcPort, null, 0, (seq + 1) and 0xFFFFFFFFL, 0x14), true)
+                    blockRstCount.incrementAndGet()
+                    maybeSummary()
+                    return
+                }
+                if (!gateReady()) {
+                    val seq = getLong(packet, hLen + 4)
+                    enqueueTun(buildTcp4(dstIp, srcIp, dstPort, srcPort, null, 0, (seq + 1) and 0xFFFFFFFFL, 0x14), true)
+                    fastGateRst.incrementAndGet()
+                    maybeSummary()
+                    return
+                }
                 val seq = getLong(packet, hLen + 4)
                 val newSession = TcpSession(key, 4, srcBytes, dstBytes, srcPort, dstPort, seq, uid)
-                tcpSessions[key] = newSession
-                safeExecute { newSession.run() }
+                val prev = tcpSessions.putIfAbsent(key, newSession)
+                if (prev != null) return
+                launchSession(key, true, {
+                    val s = getLong(packet, hLen + 4)
+                    enqueueTun(buildTcp4(dstIp, srcIp, dstPort, srcPort, null, 0, (s + 1) and 0xFFFFFFFFL, 0x14), true)
+                }) { newSession.run() }
+                maybeSummary()
             }
         } else {
             if (len < hLen + 8) return
@@ -323,20 +531,26 @@ class SocksTunBridge(
                 logDnsQuery(domain, dstIpStr)
                 if (domain != null && routingEngine.resolve(dstIpStr, 53, domain, null, null).mode == RoutingMode.BLOCK) {
                     LogRepository.i("[DnsGuard] [Block] domain=$domain", "DnsGuard")
+                    blockNxCount.incrementAndGet()
                     val nxResponse = buildDnsNXResponse(payload)
                     if (nxResponse != null) {
                         enqueueTun(buildUdp4(dstIp, srcIp, 53, srcPort, nxResponse), true)
                         return
                     }
                 }
-                safeExecute {
-                    val response = dnsResolver.resolve(payload, dstIpStr)
+                if (!gateReady()) {
+                    fastGateDrop.incrementAndGet()
+                    maybeSummary()
+                    return
+                }
+                val q = payload
+                val srv = dstIpStr
+                launchSession(FlowKey4(17, srcIp, srcPort, dstIp, dstPort), false, {}) {
+                    val response = dnsResolver.resolve(q, srv)
                     if (response != null) {
                         sniffDnsResponse(response)
                         enqueueTun(buildUdp4(dstIp, srcIp, 53, srcPort, response), true)
                         logDnsResponse()
-                    } else {
-                        dispatchUdp4(FlowKey4(17, srcIp, srcPort, dstIp, dstPort), srcIp, dstIp, srcPort, dstPort, payload)
                     }
                 }
                 return
@@ -364,28 +578,48 @@ class SocksTunBridge(
         if (session != null) {
             if (isUidBlocked(session.uid)) {
                 udpSessions.remove(key, session)
-                session.close()
+                session.forceClose()
                 return
             }
-            session.queue(payload)
-        } else {
-            val srcBytes = intToBytes(srcIp)
-            val dstBytes = intToBytes(dstIp)
-            val local = InetSocketAddress(InetAddress.getByAddress(srcBytes), srcPort)
-            val remote = InetSocketAddress(InetAddress.getByAddress(dstBytes), dstPort)
-            val uid = ownerUid(OsConstants.IPPROTO_UDP, local, remote)
-
-            if (uid == -1 && currentBlockedUids().isNotEmpty()) {
-                LogRepository.w("Flow owner UID unresolved; permitting connection")
-            }
-
-            if (isUidBlocked(uid)) return
-
-            val newSession = UdpSession(key, 4, srcBytes, dstBytes, srcPort, dstPort, uid)
-            udpSessions[key] = newSession
-            safeExecute { newSession.run() }
-            newSession.queue(payload)
+            if (!session.queue(payload)) sessDropCount.incrementAndGet()
+            return
         }
+        if (!gateReady()) {
+            fastGateDrop.incrementAndGet()
+            maybeSummary()
+            return
+        }
+        val srcBytes = intToBytes(srcIp)
+        val dstBytes = intToBytes(dstIp)
+        val dstIpStr = InetAddress.getByAddress(dstBytes).hostAddress ?: ""
+        if (fastClassify(dstIpStr, dstPort, DnsMap.get(dstIpStr)) == RoutingMode.BLOCK) {
+            blockRstCount.incrementAndGet()
+            maybeSummary()
+            return
+        }
+        val local = InetSocketAddress(InetAddress.getByAddress(srcBytes), srcPort)
+        val remote = InetSocketAddress(InetAddress.getByAddress(dstBytes), dstPort)
+        val uid = resolveOwnerUid(key, OsConstants.IPPROTO_UDP, local, remote)
+
+        if (uid == -1) {
+            if (currentBlockedUids().isNotEmpty()) {
+                LogRepository.d("[TunBridge] UID unresolved for ${local.address.hostAddress}:$srcPort->${remote.address.hostAddress}:$dstPort proto=UDP; holding for next datagram")
+                return
+            }
+            LogRepository.w("Flow owner UID unresolved; permitting connection")
+        }
+
+        if (isUidBlocked(uid)) return
+
+        val newSession = UdpSession(key, 4, srcBytes, dstBytes, srcPort, dstPort, uid)
+        val prev = udpSessions.putIfAbsent(key, newSession)
+        if (prev != null) {
+            if (!prev.queue(payload)) sessDropCount.incrementAndGet()
+            return
+        }
+        if (!newSession.queue(payload)) sessDropCount.incrementAndGet()
+        launchSession(key, false, {}) { newSession.run() }
+        maybeSummary()
     }
 
     private fun processIpv6(packet: ByteArray, len: Int) {
@@ -432,9 +666,13 @@ class SocksTunBridge(
             if ((flags and 0x02) != 0 && (flags and 0x10) == 0) {
                 val local = InetSocketAddress(InetAddress.getByAddress(srcIp), srcPort)
                 val remote = InetSocketAddress(InetAddress.getByAddress(dstIp), dstPort)
-                val uid = ownerUid(OsConstants.IPPROTO_TCP, local, remote)
+                val uid = resolveOwnerUid(key, OsConstants.IPPROTO_TCP, local, remote)
 
-                if (uid == -1 && currentBlockedUids().isNotEmpty()) {
+                if (uid == -1) {
+                    if (currentBlockedUids().isNotEmpty()) {
+                        LogRepository.d("[TunBridge] UID unresolved for ${local.address.hostAddress}:$srcPort->${remote.address.hostAddress}:$dstPort proto=TCP; holding for retransmit")
+                        return
+                    }
                     LogRepository.w("Flow owner UID unresolved; permitting connection")
                 }
 
@@ -443,11 +681,30 @@ class SocksTunBridge(
                     enqueueTun(buildTcp6(dstIp, srcIp, dstPort, srcPort, null, 0, (seq + 1) and 0xFFFFFFFFL, 0x14), true)
                     return
                 }
-
+                val dstIpStr = InetAddress.getByAddress(dstIp).hostAddress ?: ""
+                if (fastClassify(dstIpStr, dstPort, DnsMap.get(dstIpStr)) == RoutingMode.BLOCK) {
+                    val seq = getLong(packet, offset + 4)
+                    enqueueTun(buildTcp6(dstIp, srcIp, dstPort, srcPort, null, 0, (seq + 1) and 0xFFFFFFFFL, 0x14), true)
+                    blockRstCount.incrementAndGet()
+                    maybeSummary()
+                    return
+                }
+                if (!gateReady()) {
+                    val seq = getLong(packet, offset + 4)
+                    enqueueTun(buildTcp6(dstIp, srcIp, dstPort, srcPort, null, 0, (seq + 1) and 0xFFFFFFFFL, 0x14), true)
+                    fastGateRst.incrementAndGet()
+                    maybeSummary()
+                    return
+                }
                 val seq = getLong(packet, offset + 4)
                 val newSession = TcpSession(key, 6, srcIp, dstIp, srcPort, dstPort, seq, uid)
-                tcpSessions[key] = newSession
-                safeExecute { newSession.run() }
+                val prev = tcpSessions.putIfAbsent(key, newSession)
+                if (prev != null) return
+                launchSession(key, true, {
+                    val s = getLong(packet, offset + 4)
+                    enqueueTun(buildTcp6(dstIp, srcIp, dstPort, srcPort, null, 0, (s + 1) and 0xFFFFFFFFL, 0x14), true)
+                }) { newSession.run() }
+                maybeSummary()
             }
         } else if (transport.nextHeader == 17) {
             if (len < offset + 8) return
@@ -459,20 +716,26 @@ class SocksTunBridge(
                 logDnsQuery(domain, dstIpStr)
                 if (domain != null && routingEngine.resolve(dstIpStr, 53, domain, null, null).mode == RoutingMode.BLOCK) {
                     LogRepository.i("[DnsGuard] [Block] domain=$domain", "DnsGuard")
+                    blockNxCount.incrementAndGet()
                     val nxResponse = buildDnsNXResponse(payload)
                     if (nxResponse != null) {
                         enqueueTun(buildUdp6(dstIp, srcIp, 53, srcPort, nxResponse), true)
                         return
                     }
                 }
-                safeExecute {
-                    val response = dnsResolver.resolve(payload, dstIpStr)
+                if (!gateReady()) {
+                    fastGateDrop.incrementAndGet()
+                    maybeSummary()
+                    return
+                }
+                val q = payload
+                val srv = dstIpStr
+                launchSession(FlowKey6(17, srcIp, srcPort, dstIp, dstPort), false, {}) {
+                    val response = dnsResolver.resolve(q, srv)
                     if (response != null) {
                         sniffDnsResponse(response)
                         enqueueTun(buildUdp6(dstIp, srcIp, 53, srcPort, response), true)
                         logDnsResponse()
-                    } else {
-                        dispatchUdp6(FlowKey6(17, srcIp, srcPort, dstIp, dstPort), srcIp, dstIp, srcPort, dstPort, payload)
                     }
                 }
                 return
@@ -500,26 +763,46 @@ class SocksTunBridge(
         if (session != null) {
             if (isUidBlocked(session.uid)) {
                 udpSessions.remove(key, session)
-                session.close()
+                session.forceClose()
                 return
             }
-            session.queue(payload)
-        } else {
-            val local = InetSocketAddress(InetAddress.getByAddress(srcIp), srcPort)
-            val remote = InetSocketAddress(InetAddress.getByAddress(dstIp), dstPort)
-            val uid = ownerUid(OsConstants.IPPROTO_UDP, local, remote)
-
-            if (uid == -1 && currentBlockedUids().isNotEmpty()) {
-                LogRepository.w("Flow owner UID unresolved; permitting connection")
-            }
-
-            if (isUidBlocked(uid)) return
-
-            val newSession = UdpSession(key, 6, srcIp, dstIp, srcPort, dstPort, uid)
-            udpSessions[key] = newSession
-            safeExecute { newSession.run() }
-            newSession.queue(payload)
+            if (!session.queue(payload)) sessDropCount.incrementAndGet()
+            return
         }
+        if (!gateReady()) {
+            fastGateDrop.incrementAndGet()
+            maybeSummary()
+            return
+        }
+        val dstIpStr = InetAddress.getByAddress(dstIp).hostAddress ?: ""
+        if (fastClassify(dstIpStr, dstPort, DnsMap.get(dstIpStr)) == RoutingMode.BLOCK) {
+            blockRstCount.incrementAndGet()
+            maybeSummary()
+            return
+        }
+        val local = InetSocketAddress(InetAddress.getByAddress(srcIp), srcPort)
+        val remote = InetSocketAddress(InetAddress.getByAddress(dstIp), dstPort)
+        val uid = resolveOwnerUid(key, OsConstants.IPPROTO_UDP, local, remote)
+
+        if (uid == -1) {
+            if (currentBlockedUids().isNotEmpty()) {
+                LogRepository.d("[TunBridge] UID unresolved for ${local.address.hostAddress}:$srcPort->${remote.address.hostAddress}:$dstPort proto=UDP; holding for next datagram")
+                return
+            }
+            LogRepository.w("Flow owner UID unresolved; permitting connection")
+        }
+
+        if (isUidBlocked(uid)) return
+
+        val newSession = UdpSession(key, 6, srcIp, dstIp, srcPort, dstPort, uid)
+        val prev = udpSessions.putIfAbsent(key, newSession)
+        if (prev != null) {
+            if (!prev.queue(payload)) sessDropCount.incrementAndGet()
+            return
+        }
+        if (!newSession.queue(payload)) sessDropCount.incrementAndGet()
+        launchSession(key, false, {}) { newSession.run() }
+        maybeSummary()
     }
 
     private fun ipv6Transport(packet: ByteArray, len: Int): IPv6Transport? {
@@ -558,6 +841,15 @@ class SocksTunBridge(
 
     private fun ownerUid(protocol: Int, local: InetSocketAddress, remote: InetSocketAddress): Int {
         return connectionOwnerResolver.resolve(protocol, local, remote)
+    }
+
+    private val uidCache = ConcurrentHashMap<FlowKey, Int>()
+
+    private fun resolveOwnerUid(key: FlowKey, protocol: Int, local: InetSocketAddress, remote: InetSocketAddress): Int {
+        uidCache[key]?.let { return it }
+        val uid = ownerUid(protocol, local, remote)
+        if (uid != -1) uidCache[key] = uid
+        return uid
     }
 
     @Suppress("DEPRECATION")
@@ -609,8 +901,24 @@ class SocksTunBridge(
         return uid in currentBlockedUids()
     }
 
+    @Volatile
+    private var cachedProviderPackages: Set<String> = emptySet()
+    @Volatile
+    private var cachedProviderPackagesAt: Long = 0L
+    private val providerCacheTtlMs = 2000L
+
+    private fun currentBlockedPackages(): Set<String> {
+        val now = SystemClock.elapsedRealtime()
+        val cached = cachedProviderPackages
+        if (now - cachedProviderPackagesAt < providerCacheTtlMs) return cached
+        val fresh = runCatching { blockedPackagesProvider() }.getOrDefault(cached)
+        cachedProviderPackages = fresh
+        cachedProviderPackagesAt = now
+        return fresh
+    }
+
     private fun currentBlockedUids(): Set<Int> {
-        val packages = blockedPackagesProvider()
+        val packages = currentBlockedPackages()
         return synchronized(this) {
             if (packages == cachedBlockedPackages) return@synchronized cachedBlockedUids
             val uids = mutableSetOf<Int>()
@@ -655,8 +963,39 @@ class SocksTunBridge(
         private val bytesDown = AtomicLong(0)
         private val peerAck = AtomicLong(0)
         private val targetLabel: String by lazy { InetAddress.getByAddress(serverIp).hostAddress ?: "?" }
+        private val state = java.util.concurrent.atomic.AtomicReference(TcpState.SYN_RCVD)
+        private val terminalSent = AtomicBoolean(false)
 
         fun isConnected(): Boolean = connected.get()
+        fun isActiveFlow(now: Long): Boolean {
+            if (!connected.get()) return lastActivity.get() + 10000 > now
+            return lastActivity.get() + TCP_IDLE_MS > now
+        }
+        private fun sendRstOnce() {
+            if (terminalSent.compareAndSet(false, true)) {
+                val rst = if (version == 4) {
+                    buildTcp4(bytesToInt(serverIp), bytesToInt(clientIp), serverPort, clientPort, null, mySeq.get(), myAck.get(), 0x04)
+                } else {
+                    buildTcp6(serverIp, clientIp, serverPort, clientPort, null, mySeq.get(), myAck.get(), 0x04)
+                }
+                enqueueTun(rst, true)
+            }
+            state.set(TcpState.CLOSING)
+            close()
+        }
+        private fun sendFinOnce() {
+            if (terminalSent.compareAndSet(false, true)) {
+                val fin = if (version == 4) {
+                    buildTcp4(bytesToInt(serverIp), bytesToInt(clientIp), serverPort, clientPort, null, mySeq.get(), myAck.get(), 0x11)
+                } else {
+                    buildTcp6(serverIp, clientIp, serverPort, clientPort, null, mySeq.get(), myAck.get(), 0x11)
+                }
+                enqueueTun(fin, true)
+                mySeq.set((mySeq.get() + 1) and 0xFFFFFFFFL)
+            }
+            state.set(TcpState.CLOSING)
+            close()
+        }
 
         fun handleFromTun(seq: Long, ack: Long, payload: ByteArray?, flags: Int) {
             if (isClosed.get()) return
@@ -719,20 +1058,60 @@ class SocksTunBridge(
         }
 
         fun run() {
+            state.set(TcpState.POLICY)
             try {
                 val targetIpStr: String = InetAddress.getByAddress(serverIp).hostAddress ?: ""
-                val cachedDomain = DnsMap.get(targetIpStr)
-                
+                if (!gateReady()) {
+                    sendRstOnce()
+                    return
+                }
+                var cachedDomain = DnsMap.get(targetIpStr)
                 var decision = routingEngine.resolve(targetIpStr, serverPort, cachedDomain, null, null)
+                if (decision.mode == RoutingMode.BLOCK) {
+                    cacheBlock(targetIpStr, serverPort, decision.resolvedDomain ?: cachedDomain)
+                    LogRepository.i("[Routing] BLOCK domain=${decision.resolvedDomain ?: "unknown"} ip=$targetIpStr protocol=TCP")
+                    blockRstCount.incrementAndGet()
+                    sendRstOnce()
+                    return
+                }
+                val needSniff = (serverPort == 80 || serverPort == 443) && cachedDomain == null && routingEngine.hasDomainRules()
                 var sniffedDomain: String? = null
-
+                var firstPayload: ByteArray? = null
+                if (needSniff) {
+                    val deadline = SystemClock.elapsedRealtime() + SNI_WAIT_MS
+                    while (SystemClock.elapsedRealtime() < deadline) {
+                        if (isClosed.get() || !isRunning.get()) return
+                        val p = queue.poll(25, TimeUnit.MILLISECONDS) ?: continue
+                        firstPayload = p
+                        break
+                    }
+                    if (firstPayload != null) {
+                        sniffedDomain = TrafficSniffer.sniffDomain(firstPayload, serverPort)
+                        if (sniffedDomain != null) {
+                            DnsMap.put(targetIpStr, sniffedDomain)
+                            cachedDomain = sniffedDomain
+                            decision = routingEngine.resolve(targetIpStr, serverPort, null, if (serverPort == 443) sniffedDomain else null, if (serverPort == 80) sniffedDomain else null)
+                            if (decision.mode == RoutingMode.BLOCK) {
+                                cacheBlock(targetIpStr, serverPort, decision.resolvedDomain ?: sniffedDomain)
+                                LogRepository.i("[Routing] BLOCK domain=${decision.resolvedDomain ?: "unknown"} ip=$targetIpStr protocol=TCP")
+                                blockRstCount.incrementAndGet()
+                                sendRstOnce()
+                                return
+                            }
+                        }
+                    }
+                }
                 val requestedDirect = decision.mode == RoutingMode.DIRECT
                 val directNetwork = if (requestedDirect) underlyingNetwork() else null
-                val useDirect = requestedDirect && directNetwork != null && (
-                    (version == 4 && supportsIpv4(directNetwork)) ||
-                    (version == 6 && supportsIpv6(directNetwork))
-                )
-
+                var useDirect = requestedDirect && directNetwork != null && ((version == 4 && supportsIpv4(directNetwork)) || (version == 6 && supportsIpv6(directNetwork)))
+                if (decision.matchedRule != null) {
+                    LogRepository.i("[Routing] ${decision.mode.name} domain=${decision.resolvedDomain ?: "unknown"} ip=$targetIpStr protocol=TCP")
+                }
+                if (requestedDirect && !useDirect) {
+                    LogRepository.i("[Routing] DIRECT_FALLBACK domain=${decision.resolvedDomain ?: "unknown"} ip=$targetIpStr protocol=TCP reason=no_underlying_route")
+                    useDirect = false
+                }
+                if (useDirect) directFlowCount.incrementAndGet() else tunnelFlowCount.incrementAndGet()
                 val synAck = if (version == 4) {
                     buildTcp4(bytesToInt(serverIp), bytesToInt(clientIp), serverPort, clientPort, null, mySeq.get(), myAck.get(), 0x12)
                 } else {
@@ -740,69 +1119,24 @@ class SocksTunBridge(
                 }
                 enqueueTun(synAck, true)
                 mySeq.set((mySeq.get() + 1) and 0xFFFFFFFFL)
-
-                if (serverPort == 80 || serverPort == 443) {
-                    val firstPacket = queue.poll(1, TimeUnit.SECONDS)
-                    if (firstPacket != null) {
-                        sniffedDomain = TrafficSniffer.sniffDomain(firstPacket, serverPort)
-                        if (sniffedDomain != null) {
-                            DnsMap.put(targetIpStr, sniffedDomain)
-                            decision = routingEngine.resolve(
-                                targetIpStr,
-                                serverPort,
-                                null,
-                                if (serverPort == 443) sniffedDomain else null,
-                                if (serverPort == 80) sniffedDomain else null
-                            )
-                        }
-                        queue.addFirst(firstPacket)
-                    }
-                }
-
-                if (decision.matchedRule != null) {
-                    if (requestedDirect && !useDirect) {
-                        LogRepository.i("[Routing] DIRECT_REJECTED domain=${decision.resolvedDomain ?: "unknown"} ip=$targetIpStr protocol=TCP reason=no_underlying_route")
-                    } else {
-                        LogRepository.i("[Routing] ${decision.mode.name} domain=${decision.resolvedDomain ?: "unknown"} ip=$targetIpStr protocol=TCP")
-                    }
-                }
-
-                if (requestedDirect && !useDirect) {
-                    val rst = if (version == 4) {
-                        buildTcp4(bytesToInt(serverIp), bytesToInt(clientIp), serverPort, clientPort, null, mySeq.get(), myAck.get(), 0x14)
-                    } else {
-                        buildTcp6(serverIp, clientIp, serverPort, clientPort, null, mySeq.get(), myAck.get(), 0x14)
-                    }
-                    enqueueTun(rst, true)
-                    close()
-                    return
-                }
-
-                if (decision.mode == RoutingMode.BLOCK) {
-                    val rst = if (version == 4) {
-                        buildTcp4(bytesToInt(serverIp), bytesToInt(clientIp), serverPort, clientPort, null, mySeq.get(), myAck.get(), 0x04)
-                    } else {
-                        buildTcp6(serverIp, clientIp, serverPort, clientPort, null, mySeq.get(), myAck.get(), 0x04)
-                    }
-                    enqueueTun(rst, true)
-                    close()
-                    return
-                }
-
+                state.set(TcpState.CONNECTING)
                 val s = Socket()
                 sock = s
                 s.tcpNoDelay = true
                 s.keepAlive = true
                 s.receiveBufferSize = 262144
                 s.sendBufferSize = 262144
-                
                 val ins: InputStream
                 val out: OutputStream
-                
-                if (useDirect) {
+                if (useDirect && directNetwork != null) {
                     val network = directNetwork
                     network.bindSocket(s)
-                    s.connect(InetSocketAddress(targetIpStr, serverPort), 5000)
+                    try {
+                        s.connect(InetSocketAddress(targetIpStr, serverPort), connectTimeoutMs())
+                    } catch (_: Exception) {
+                        sendRstOnce()
+                        return
+                    }
                     ins = s.getInputStream()
                     out = BufferedOutputStream(s.getOutputStream(), 131072)
                     val directNetworkType = networkLabel(network)
@@ -811,73 +1145,119 @@ class SocksTunBridge(
                 } else {
                     if (!vpnService.protect(s)) {
                         LogRepository.w("[TunBridge] protect failed for $targetIpStr:$serverPort")
-                        close()
+                        sendRstOnce()
                         return
                     }
                     try {
-                        s.connect(InetSocketAddress(socksHost, socksPort), 5000)
+                        s.connect(InetSocketAddress(socksHost, socksPort), connectTimeoutMs())
                     } catch (e: Exception) {
                         val gate = SocksGate.readiness.value
-                        val detail = if (gate != SocksReadiness.PROBED_OK) " gate=$gate mtu=$mtu socks not ready" else " gate=$gate mtu=$mtu"
-                        LogRepository.e("[TunBridge] Failed to connect to SOCKS5 $socksHost:$socksPort for target=$targetIpStr:$serverPort:$serverPort domain=${sniffedDomain ?: cachedDomain ?: "-"}:$detail err=${e.message}")
-                        close()
+                        LogRepository.w("[TunBridge] upstream connect failed target=$targetIpStr:$serverPort gate=$gate err=${e.message}")
+                        sendRstOnce()
                         return
                     }
                     ins = s.getInputStream()
                     out = BufferedOutputStream(s.getOutputStream(), 131072)
                     if (!socksHandshake(ins, out)) {
                         LogRepository.w("[TunBridge] SOCKS5 handshake failed for target=$targetIpStr:$serverPort mtu=$mtu gate=${SocksGate.readiness.value}")
-                        close()
+                        sendRstOnce()
                         return
                     }
                     out.write(socksRequest(1, sniffedDomain ?: cachedDomain, serverIp, serverPort))
                     out.flush()
                     if (readSocksReply(ins) == null) {
                         LogRepository.w("[TunBridge] SOCKS5 CONNECT reply failed for target=$targetIpStr:$serverPort mtu=$mtu gate=${SocksGate.readiness.value}")
-                        close()
+                        sendRstOnce()
                         return
                     }
-                    LogRepository.i("[TunBridge] SOCKS5 tunnel established to $targetIpStr:$serverPort via $socksHost:$socksPort mtu=$mtu gate=${SocksGate.readiness.value} domain=${sniffedDomain ?: cachedDomain ?: "-"}")
                 }
-
                 connected.set(true)
+                state.set(TcpState.ESTABLISHED)
                 lastActivity.set(SystemClock.elapsedRealtime())
-
                 if (isClosed.get()) return
-
-                safeExecuteInline { readFromSocks(ins) }
-
+                try {
+                    bridgeScope.launch { readFromSocks(ins) }
+                } catch (_: Exception) {
+                    sendRstOnce()
+                    return
+                }
+                if (firstPayload != null) {
+                    val late = TrafficSniffer.sniffDomain(firstPayload, serverPort)
+                    val eff = late ?: sniffedDomain
+                    if (eff != null && eff != cachedDomain) {
+                        val rd = routingEngine.resolve(targetIpStr, serverPort, null, if (serverPort == 443) eff else null, if (serverPort == 80) eff else null)
+                        if (rd.mode == RoutingMode.BLOCK) {
+                            cacheBlock(targetIpStr, serverPort, rd.resolvedDomain ?: eff)
+                            blockRstCount.incrementAndGet()
+                            sendRstOnce()
+                            return
+                        }
+                    }
+                    try {
+                        out.write(firstPayload)
+                        out.flush()
+                        bytesUp.addAndGet(firstPayload.size.toLong())
+                        lastActivity.set(SystemClock.elapsedRealtime())
+                    } catch (_: Exception) {
+                        sendFinOnce()
+                        return
+                    }
+                    firstPayload = null
+                }
+                var sniffDone = sniffedDomain != null || !needSniff
                 while (!isClosed.get() && isRunning.get()) {
                     val data = queue.poll(2, TimeUnit.SECONDS)
-
                     if (data == null) {
                         if (clientClosed.get() && queue.isEmpty() && outputShutdown.compareAndSet(false, true)) {
                             runCatching { sock?.shutdownOutput() }
                         }
-
-                        if (SystemClock.elapsedRealtime() - lastActivity.get() > 120000) {
-                            close()
+                        if (SystemClock.elapsedRealtime() - lastActivity.get() > TCP_IDLE_MS) {
+                            sendFinOnce()
                             break
                         }
-
                         continue
                     }
-
-                    out.write(data)
-
+                    if (!sniffDone && (serverPort == 80 || serverPort == 443)) {
+                        val late = TrafficSniffer.sniffDomain(data, serverPort)
+                        sniffDone = true
+                        if (late != null) {
+                            DnsMap.put(targetIpStr, late)
+                            val rd = routingEngine.resolve(targetIpStr, serverPort, null, if (serverPort == 443) late else null, if (serverPort == 80) late else null)
+                            if (rd.mode == RoutingMode.BLOCK) {
+                                cacheBlock(targetIpStr, serverPort, rd.resolvedDomain ?: late)
+                                blockRstCount.incrementAndGet()
+                                sendRstOnce()
+                                return
+                            }
+                        }
+                    }
+                    try {
+                        out.write(data)
+                    } catch (_: Exception) {
+                        sendFinOnce()
+                        break
+                    }
                     var count = 0
                     var drainBytes = data.size
                     while (count < 64) {
                         val next = queue.poll() ?: break
-                        out.write(next)
+                        try {
+                            out.write(next)
+                        } catch (_: Exception) {
+                            sendFinOnce()
+                            return
+                        }
                         drainBytes += next.size
                         count++
                     }
-
+                    try {
+                        out.flush()
+                    } catch (_: Exception) {
+                        sendFinOnce()
+                        break
+                    }
                     bytesUp.addAndGet(drainBytes.toLong())
-                    out.flush()
                     lastActivity.set(SystemClock.elapsedRealtime())
-
                     if (clientClosed.get() && queue.isEmpty() && outputShutdown.compareAndSet(false, true)) {
                         runCatching { sock?.shutdownOutput() }
                     }
@@ -900,14 +1280,7 @@ class SocksTunBridge(
                     val n = ins.read(buffer)
 
                     if (n <= 0) {
-                        val fin = if (version == 4) {
-                            buildTcp4(bytesToInt(serverIp), bytesToInt(clientIp), serverPort, clientPort, null, mySeq.get(), myAck.get(), 0x11)
-                        } else {
-                            buildTcp6(serverIp, clientIp, serverPort, clientPort, null, mySeq.get(), myAck.get(), 0x11)
-                        }
-
-                        enqueueTun(fin, true)
-                        mySeq.set((mySeq.get() + 1) and 0xFFFFFFFFL)
+                        sendFinOnce()
                         break
                     }
 
@@ -938,11 +1311,16 @@ class SocksTunBridge(
 
         fun close() {
             if (isClosed.getAndSet(true)) return
-            LogRepository.d(
-                "[TunBridge] Session closed target=$targetLabel:$serverPort up=${bytesUp.get()} down=${bytesDown.get()} peerAck=${peerAck.get()} sentSeq=${mySeq.get()} connected=${connected.get()} lifetimeMs=${SystemClock.elapsedRealtime() - createdAt}"
-            )
+            state.set(TcpState.CLOSING)
             runCatching { sock?.close() }
             tcpSessions.remove(key, this)
+            uidCache.remove(key)
+        }
+        fun forceClose() {
+            if (isClosed.getAndSet(true)) return
+            state.set(TcpState.CLOSING)
+            runCatching { sock?.close() }
+            uidCache.remove(key)
         }
     }
 
@@ -961,10 +1339,15 @@ class SocksTunBridge(
         private var udpSock: DatagramSocket? = null
         private val lastActivity = AtomicLong(SystemClock.elapsedRealtime())
 
-        fun queue(data: ByteArray) {
-            if (!isClosed.get() && payloadQueue.offer(data)) {
-                lastActivity.set(SystemClock.elapsedRealtime())
-            }
+        fun queue(data: ByteArray): Boolean {
+            if (isClosed.get()) return false
+            val ok = payloadQueue.offer(data)
+            if (ok) lastActivity.set(SystemClock.elapsedRealtime())
+            return ok
+        }
+        fun isActiveFlow(now: Long): Boolean {
+            val idle = if (isVoipPort(serverPort)) UDP_IDLE_VOIP else UDP_IDLE_SHORT
+            return lastActivity.get() + idle > now
         }
 
         fun run() {
@@ -975,57 +1358,63 @@ class SocksTunBridge(
                 val decision = routingEngine.resolve(targetIpStr, serverPort, targetDomain, null, null)
                 val requestedDirect = decision.mode == RoutingMode.DIRECT
                 val directNetwork = if (requestedDirect) underlyingNetwork() else null
-                val isDirect = requestedDirect && directNetwork != null && (
+                var isDirect = requestedDirect && directNetwork != null && (
                     (version == 4 && supportsIpv4(directNetwork)) ||
                     (version == 6 && supportsIpv6(directNetwork))
                 )
 
                 if (serverPort == 443 && targetDomain == null && routingEngine.hasDomainRules()) {
-                    close()
-                    return
+                    LogRepository.d("[Routing] QUIC cold DnsMap miss ip=$targetIpStr protocol=UDP; fallback TUNNEL")
                 }
 
                 if (decision.matchedRule != null) {
-                    if (requestedDirect && !isDirect) {
-                        LogRepository.i("[Routing] DIRECT_REJECTED domain=${decision.resolvedDomain ?: "unknown"} ip=$targetIpStr protocol=UDP reason=no_underlying_route")
-                    } else {
-                        LogRepository.i("[Routing] ${decision.mode.name} domain=${decision.resolvedDomain ?: "unknown"} ip=$targetIpStr protocol=UDP")
-                    }
+                    LogRepository.i("[Routing] ${decision.mode.name} domain=${decision.resolvedDomain ?: "unknown"} ip=$targetIpStr protocol=UDP")
                 }
 
                 if (requestedDirect && !isDirect) {
-                    close()
-                    return
+                    LogRepository.i("[Routing] DIRECT_FALLBACK domain=${decision.resolvedDomain ?: "unknown"} ip=$targetIpStr protocol=UDP reason=no_underlying_route")
+                    isDirect = false
                 }
                 
                 if (decision.mode == RoutingMode.BLOCK) {
+                    cacheBlock(targetIpStr, serverPort, decision.resolvedDomain ?: targetDomain)
+                    blockRstCount.incrementAndGet()
                     close()
                     return
                 }
-
-                val ctrl = Socket()
-                ctrlSock = ctrl
-                if (!vpnService.protect(ctrl)) {
-                    LogRepository.w("[TunBridge] UDP protect ctrl failed for $targetIpStr:$serverPort")
+                if (!gateReady()) {
+                    fastGateDrop.incrementAndGet()
+                    close()
+                    return
                 }
-                ctrl.tcpNoDelay = true
-                
                 val relayHost: InetAddress
                 val relayPort: Int
                 val header: ByteArray
-                
+                var sharedRelay: InetSocketAddress? = null
                 if (isDirect) {
                     relayHost = InetAddress.getByName(targetIpStr)
                     relayPort = serverPort
                     header = ByteArray(0)
                 } else {
-                    try {
-                        ctrl.connect(InetSocketAddress(socksHost, socksPort), 5000)
-                    } catch (e: Exception) {
-                        LogRepository.e("[TunBridge] UDP: Failed to connect to SOCKS5 $socksHost:$socksPort for target=$targetIpStr:$serverPort mtu=$mtu gate=${SocksGate.readiness.value} err=${e.message}")
-                        close()
-                        return
-                    }
+                    sharedRelay = associatePool.relayFor()
+                    if (sharedRelay != null) {
+                        relayHost = sharedRelay.address
+                        relayPort = sharedRelay.port
+                        header = socksUdpHeader(targetDomain, serverIp, serverPort)
+                    } else {
+                        val ctrl = Socket()
+                        ctrlSock = ctrl
+                        if (!vpnService.protect(ctrl)) {
+                            LogRepository.w("[TunBridge] UDP protect ctrl failed for $targetIpStr:$serverPort")
+                        }
+                        ctrl.tcpNoDelay = true
+                        try {
+                            ctrl.connect(InetSocketAddress(socksHost, socksPort), connectTimeoutMs())
+                        } catch (e: Exception) {
+                            LogRepository.w("[TunBridge] UDP upstream connect failed target=$targetIpStr:$serverPort gate=${SocksGate.readiness.value} err=${e.message}")
+                            close()
+                            return
+                        }
                     val ins = ctrl.getInputStream()
                     val out = ctrl.getOutputStream()
                     if (!socksHandshake(ins, out)) {
@@ -1044,12 +1433,12 @@ class SocksTunBridge(
                     relayHost = if (relay.address.isAnyLocalAddress) InetAddress.getByName(socksHost) else relay.address
                     relayPort = relay.port
                     header = socksUdpHeader(targetDomain, serverIp, serverPort)
-                    LogRepository.i("[TunBridge] UDP: SOCKS5 ASSOCIATE established, relay=$relayHost:$relayPort for target=$targetIpStr:$serverPort mtu=$mtu via $socksHost:$socksPort gate=${SocksGate.readiness.value}")
+                    }
                 }
 
                 val relaySocket = DatagramSocket()
                 udpSock = relaySocket
-                if (isDirect) {
+                if (isDirect && directNetwork != null) {
                     val network = directNetwork
                     network.bindSocket(relaySocket)
                     val directNetworkType = networkLabel(network)
@@ -1062,7 +1451,12 @@ class SocksTunBridge(
                 }
                 relaySocket.soTimeout = 10000
 
-                safeExecuteInline { receiveFromNetwork(relaySocket, isDirect) }
+                try {
+                    bridgeScope.launch { receiveFromNetwork(relaySocket, isDirect) }
+                } catch (_: Exception) {
+                    close()
+                    return
+                }
 
                 val relayAddress = InetSocketAddress(relayHost, relayPort)
                 val idleTimeoutMs = if (isVoipPort(serverPort)) UDP_IDLE_VOIP else UDP_IDLE_SHORT
@@ -1147,9 +1541,17 @@ class SocksTunBridge(
 
         fun close() {
             if (isClosed.getAndSet(true)) return
-            runCatching { ctrlSock?.close() }
+            val shared = ctrlSock == null
+            if (!shared) runCatching { ctrlSock?.close() }
             runCatching { udpSock?.close() }
             udpSessions.remove(key, this)
+            uidCache.remove(key)
+        }
+        fun forceClose() {
+            if (isClosed.getAndSet(true)) return
+            runCatching { ctrlSock?.close() }
+            runCatching { udpSock?.close() }
+            uidCache.remove(key)
         }
     }
 

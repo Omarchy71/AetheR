@@ -30,7 +30,7 @@
 
 ## 📱 Versions & Platforms
 
-- **Android Client:** `v1.6.9` (Latest Stable)
+- **Android Client:** `v1.7.1` (Latest Stable)
 - **Windows Client:** `v1.1.1` (First Public Release)
 
 ## ✨ Features
@@ -38,6 +38,7 @@
 - 🛡️ **Stealth Connectivity:** Specifically optimized to bypass protocol fingerprinting and DPI.
 - 🚀 **Advanced Transports:** Comprehensive support for **MASQUE**, **WireGuard**, **Gool (WG-in-WG)**, and **Cloudflare Zero Trust**.
 - 🔗 **Psiphon Chain:** Optional second layer routing traffic via Psiphon for a non-Iran exit IP, chainable over MASQUE, WireGuard, or Gool with Auto, Fallback, and Always modes.
+- 🧅 **Tor Chain:** Optional second layer using the Tor built into Aether Core v2.0.0, with Tor-inside-tunnel, tunnel-through-Tor, and Tor-only modes plus automatic BridgeDB bridges.
 - 📡 **Intelligent Scanning:** Real-time gateway discovery with data-plane validation before connection.
 - ⚡ **Native Performance:** Powered by a high-throughput core for low latency and high bandwidth.
 - 🖥️ **Multi-Platform UI:** Clean, iOS-inspired dashboard built with **Compose Multiplatform** for a seamless experience on both mobile and desktop.
@@ -62,15 +63,31 @@ Enterprise-grade security for individuals and organizations. It allows you to ro
 ### 🔗 Psiphon Chain
 An optional second layer built on the open-source Psiphon tunnel core. It routes traffic via Psiphon to obtain a non-Iran exit IP and can chain over MASQUE, WireGuard, or Gool. Chain modes include Auto, Fallback, and Always, with a selectable egress region and local endpoints on `127.0.0.1:3080` (SOCKS) and `127.0.0.1:1820` (HTTP).
 
+### 🧅 Tor Chain (Android, Aether Core v2.0.0)
+An optional second layer using the Tor implementation built into the Aether core — no separate Tor app or manual bridge setup required.
+
+**Chain provider selector:** Settings → Connection lets you choose which second layer combines with Aether: **Psiphon** (default, backward compatible) or **Tor**. The Dashboard shows the settings card for the selected provider only.
+
+**Tor modes:**
+- **Tor inside tunnel (`TOR`):** Aether connects first, then Tor rides inside it (`you → WARP → Tor → internet`). The Tor exit is exposed on the configured Tor port (default `127.0.0.1:3081`). Works with any transport — MASQUE, WireGuard, Gool, and MASQUE-in-MASQUE.
+- **Tunnel through Tor (`TOR_REVERSE`):** the tunnel is dialed through Tor, so WARP is reached from a Tor exit and the local network never sees WARP (`you → Tor → WARP → internet`). MASQUE over HTTP/2 only — WireGuard and Gool endpoints are UDP-only and are refused in this mode.
+- **Tor only (`TOR_ONLY`):** no Aether tunnel at all; the main proxy is plain Tor.
+
+**Bridges & transports:** where Tor is blocked, the core fetches its own bridges from BridgeDB for the country you appear to be in — no CAPTCHA, nothing to paste. Pluggable transports (obfs4, snowflake, webtunnel, meek) are discovered automatically; `--tor-pt-dir` remains available in settings as a manual override pointing at a folder with transport binaries. An optional bridge country, forced-bridges mode, and manual bridge lines are also exposed.
+
+### 🌀 MASQUE-in-MASQUE (`--mim`)
+A MASQUE tunnel carried inside another MASQUE tunnel, changing the exit address the way Gool does but on the MASQUE carrier (HTTP/3 in HTTP/3, or HTTP/2 in HTTP/2 with `--h2`). The outer hop is found by scan and the inner one is picked automatically unless named explicitly, and it can carry Tor like any other transport.
+
 ---
 
 ## 🏗️ Technical Architecture
 
-### [Aether Core (v1.9.0)](https://github.com/CluvexStudio/Aether)
+### [Aether Core (v2.0.0)](https://github.com/CluvexStudio/Aether)
 The orchestration layer responsible for:
 - Encrypted tunnel management.
 - Dynamic gateway health checks.
-- Multi-protocol handling (MASQUE, WG).
+- Multi-protocol handling (MASQUE, WG, Gool, MASQUE-in-MASQUE).
+- Built-in Tor (arti) with automatic BridgeDB bridges and pluggable transports.
 
 ### [HEV SOCKS5 Tunnel v2.17.1](https://github.com/heiher/hev-socks5-tunnel/releases/tag/2.17.1)
 The native bridge between the system and Aether (Android Native):
