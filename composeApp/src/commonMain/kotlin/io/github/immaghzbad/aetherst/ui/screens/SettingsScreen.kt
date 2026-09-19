@@ -110,6 +110,7 @@ import androidx.compose.ui.unit.sp
 import io.github.immaghzbad.aetherst.platform.isDesktop
 import io.github.immaghzbad.aetherst.shared.core.NetworkUtils
 import io.github.immaghzbad.aetherst.shared.model.AetherConfig
+import io.github.immaghzbad.aetherst.shared.model.TorMode
 import io.github.immaghzbad.aetherst.shared.model.AetherIpMode
 import io.github.immaghzbad.aetherst.shared.model.AetherLogLevel
 import io.github.immaghzbad.aetherst.shared.model.AetherNoise
@@ -147,6 +148,7 @@ enum class SettingsPage(val title: String) {
     ZEROTRUST("Cloudflare Zero Trust"),
     NETWORK("Network Parameters"),
     SECURITY("Security & Reliability"),
+    TOR("Tor"),
     AUTO_CONNECT("Auto-Connect & Recovery"),
     DIAGNOSTICS("Diagnostics & Core"),
     SYSTEM("System & Maintenance"),
@@ -246,6 +248,7 @@ fun SettingsScreen(
         }
         item { CategoryCard(icon = Icons.Default.Language, iconBg = IosActiveBlue, title = strings.CAT_NETWORK_PARAMETERS, subtitle = strings.CAT_NETWORK_PARAMETERS_SUB, onClick = { currentPage = SettingsPage.NETWORK }) }
         item { CategoryCard(icon = Icons.Default.Lock, iconBg = AppPalette.statusError, title = strings.CAT_SECURITY_RELIABILITY, subtitle = strings.CAT_SECURITY_RELIABILITY_SUB, onClick = { currentPage = SettingsPage.SECURITY }) }
+        item { CategoryCard(icon = Icons.Default.Shield, iconBg = IosActiveGreen, title = strings.TOR_TITLE, subtitle = strings.TOR_OPTIONS_SUBTITLE, onClick = { currentPage = SettingsPage.TOR }) }
         item { CategoryCard(icon = Icons.Default.Repeat, iconBg = AppPalette.statusConnected, title = strings.CAT_AUTO_CONNECT, subtitle = strings.CAT_AUTO_CONNECT_SUB, onClick = { currentPage = SettingsPage.AUTO_CONNECT }) }
         item { CategoryCard(icon = Icons.Default.BugReport, iconBg = AppPalette.debugCyan, title = strings.CAT_DIAGNOSTICS_CORE, subtitle = strings.CAT_DIAGNOSTICS_CORE_SUB, onClick = { currentPage = SettingsPage.DIAGNOSTICS }) }
         if (isAndroid) {
@@ -270,7 +273,7 @@ private fun CategoryCard(icon: ImageVector, iconBg: Color, title: String, subtit
 }
 
 @Composable
-private fun SettingsSubPage(page: SettingsPage, config: AetherConfig, isBatteryOptimized: Boolean, onBack: () -> Unit, onUpdateConfig: (AetherConfig) -> Unit, onUpdateTunnelEngine: (TunnelEngine) -> Unit, onApplyPreset: (String) -> Unit, onOpenSplitTunneling: () -> Unit, onOpenRoutingRules: () -> Unit, onRequestBatteryOptimization: () -> Unit, onOpenVpnSettings: () -> Unit, onResetAll: () -> Unit, onExportBackup: () -> Unit, onImportBackup: () -> Unit, onOptimizeMtu: () -> Unit, isOptimizingMtu: Boolean, onShowToast: (String, Boolean) -> Unit, bottomContentPadding: Dp, onOpenDnsOptimizer: () -> Unit = {}, loadAutoConnectSettings: () -> AutoConnectSettings = { AutoConnectSettings() }, saveAutoConnectSettings: (AutoConnectSettings) -> Unit = {}) {
+private fun SettingsSubPage(page: SettingsPage, config: AetherConfig, isBatteryOptimized: Boolean, onBack: () -> Unit, onUpdateConfig: (AetherConfig) -> Unit, onUpdateTunnelEngine: (TunnelEngine) -> Unit, onApplyPreset: (String) -> Unit, onOpenSplitTunneling: () -> Unit, onOpenRoutingRules: () -> Unit, onRequestBatteryOptimization: () -> Unit, onOpenVpnSettings: () -> Unit, onResetAll: () -> Unit, onExportBackup: () -> Unit, onImportBackup: () -> Unit, onOptimizeMtu: () -> Unit, isOptimizingMtu: Boolean, onShowToast: (String, Boolean) -> Unit, bottomContentPadding: Dp, onOpenDnsOptimizer: () -> Unit = {}, loadAutoConnectSettings: () -> AutoConnectSettings = { AutoConnectSettings() }, saveAutoConnectSettings: (AutoConnectSettings) -> Unit = {}, onOpenTorSettings: () -> Unit = {}) {
     var showResetDialog by remember { mutableStateOf(false) }
     var showAdvancedZt by remember { mutableStateOf(false) }
     val isAndroid = remember { try { Class.forName("android.os.Build"); true } catch(_: Throwable) { false } }
@@ -290,6 +293,7 @@ private fun SettingsSubPage(page: SettingsPage, config: AetherConfig, isBatteryO
                     SettingsPage.ZEROTRUST -> strings.CAT_ZEROTRUST
                     SettingsPage.NETWORK -> strings.CAT_NETWORK_PARAMETERS
                     SettingsPage.SECURITY -> strings.CAT_SECURITY_RELIABILITY
+                    SettingsPage.TOR -> strings.TOR_TITLE
                     SettingsPage.AUTO_CONNECT -> strings.CAT_AUTO_CONNECT
                     SettingsPage.DIAGNOSTICS -> strings.CAT_DIAGNOSTICS_CORE
                     SettingsPage.HEV_ENGINE -> strings.CAT_HEV_ENGINE
@@ -306,6 +310,7 @@ private fun SettingsSubPage(page: SettingsPage, config: AetherConfig, isBatteryO
                 SettingsPage.ZEROTRUST -> item { ZeroTrustPage(config, showAdvancedZt, onUpdateConfig) { showAdvancedZt = it } }
                 SettingsPage.NETWORK -> item { NetworkPage(config, onUpdateConfig, onShowToast, onOpenDnsOptimizer) }
                 SettingsPage.SECURITY -> item { SecurityPage(config, isAndroid, isBatteryOptimized, onUpdateConfig, onRequestBatteryOptimization) }
+                SettingsPage.TOR -> item { TorPage(config, onUpdateConfig) }
                 SettingsPage.AUTO_CONNECT -> item { AutoConnectPage(isAndroid, loadAutoConnectSettings, saveAutoConnectSettings) }
                 SettingsPage.DIAGNOSTICS -> item { DiagnosticsPage(config, onUpdateConfig) }
                 SettingsPage.HEV_ENGINE -> item { HevEnginePage(config, onUpdateConfig) }
@@ -780,5 +785,107 @@ private fun encodeUpstreamCredential(s: String): String = s.replace("@", "%40").
             )
         }
     }
+}
+
+@Composable private fun TorPage(config: AetherConfig, onUpdateConfig: (AetherConfig) -> Unit) {
+    val strings = LocalAppStrings.current
+    IosGroupCard { Column {
+        IosSwitchRow(
+            icon = Icons.Default.Shield,
+            iconBg = IosActiveGreen,
+            title = strings.TOR_ENABLE,
+            subtitle = if (config.torEnabled) strings.TOR_OPTIONS_SUBTITLE else strings.TOR_DISABLE,
+            checked = config.torEnabled,
+            onCheckedChange = { onUpdateConfig(config.copy(torEnabled = it)) },
+            testTag = "switch_tor_enabled"
+        ); AppDivider()
+        if (config.torEnabled) {
+            IosPickerRow(
+                icon = Icons.Default.SwapHoriz,
+                iconBg = IosActiveBlue,
+                title = strings.TOR_MODE,
+                value = config.torMode.displayName,
+                options = TorMode.entries.map { it.displayName },
+                onOptionSelected = { idx ->
+                    val mode = TorMode.entries[idx]
+                    onUpdateConfig(config.copy(torMode = mode))
+                }
+            ); AppDivider()
+            IosInputFieldRow(
+                icon = Icons.Default.Settings,
+                iconBg = AppPalette.statusScanning,
+                label = strings.TOR_BIND_PORT,
+                value = config.torBindPort,
+                onValueChange = { onUpdateConfig(config.copy(torBindPort = it)) },
+                placeholder = "3081",
+                keyboardType = KeyboardType.Number,
+                testTag = "input_tor_bind_port"
+            ); AppDivider()
+            IosPickerRow(
+                icon = Icons.Default.NetworkCheck,
+                iconBg = IosActiveGreen,
+                title = strings.TOR_BRIDGES,
+                value = when (config.torBridgesMode.trim().lowercase()) {
+                    "force" -> strings.TOR_BRIDGES_FORCE
+                    "off" -> strings.TOR_BRIDGES_OFF
+                    else -> strings.TOR_BRIDGES_AUTO
+                },
+                options = listOf(strings.TOR_BRIDGES_AUTO, strings.TOR_BRIDGES_FORCE, strings.TOR_BRIDGES_OFF),
+                onOptionSelected = { idx ->
+                    val mode = when (idx) {
+                        0 -> "auto"
+                        1 -> "force"
+                        else -> "off"
+                    }
+                    onUpdateConfig(config.copy(torBridgesMode = mode))
+                }
+            ); AppDivider()
+            if (config.torBridgesMode.trim().lowercase() == "force") {
+                IosInputFieldRow(
+                    icon = Icons.Default.Public,
+                    iconBg = IosActiveBlue,
+                    label = strings.TOR_MANUAL_BRIDGES,
+                    value = config.torBridgeLines,
+                    onValueChange = { onUpdateConfig(config.copy(torBridgeLines = it)) },
+                    placeholder = "Bridge lines separated by ;",
+                    testTag = "input_tor_bridges"
+                ); AppDivider()
+            }
+            IosInputFieldRow(
+                icon = Icons.Default.Public,
+                iconBg = AppPalette.accentVariant,
+                label = strings.TOR_COUNTRY,
+                value = config.torCountry,
+                onValueChange = { onUpdateConfig(config.copy(torCountry = it)) },
+                placeholder = "ir",
+                testTag = "input_tor_country"
+            ); AppDivider()
+            IosInputFieldRow(
+                icon = Icons.Default.Storage,
+                iconBg = IosSecondaryLabel,
+                label = strings.TOR_PT_DIR,
+                value = config.torPtDir,
+                onValueChange = { onUpdateConfig(config.copy(torPtDir = it)) },
+                placeholder = "pt/",
+                testTag = "input_tor_pt_dir"
+            ); AppDivider()
+            IosInputFieldRow(
+                icon = Icons.Default.Storage,
+                iconBg = IosSecondaryLabel,
+                label = strings.TOR_PT_BINARIES,
+                value = config.torPtBinaries,
+                onValueChange = { onUpdateConfig(config.copy(torPtBinaries = it)) },
+                placeholder = "pt/",
+                testTag = "input_tor_pt_binaries"
+            ); AppDivider()
+            IosActionRow(
+                icon = Icons.Default.Info,
+                iconBg = IosActiveBlue,
+                title = strings.TOR_HOW,
+                subtitle = strings.TOR_OPTIONS_SUBTITLE,
+                onClick = { /* show info dialog */ }
+            )
+        }
+    } }
 }
 

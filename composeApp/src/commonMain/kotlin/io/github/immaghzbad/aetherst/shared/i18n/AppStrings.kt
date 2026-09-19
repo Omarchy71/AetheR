@@ -255,6 +255,11 @@ interface AppStrings {
     val TOR_COUNTRY: String
     val TOR_PT_DIR: String
     val TOR_HOW: String
+    val TOR_ENABLE: String
+    val TOR_DISABLE: String
+    val TOR_TITLE: String
+    val TOR_PT_BINARIES: String
+    val TOR_BRIDGE_LINES: String
     val MIM_ENABLE: String
     val MIM_ENABLE_SUB: String
     val MIM_OUTER: String
